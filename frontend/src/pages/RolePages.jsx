@@ -836,11 +836,63 @@ export function DoctorDashboard({ user }) {
 
 export function AppointmentDetails({ user }) {
   const appointments = useApi("/opd/appointments");
+  const tests = useApi("/tests/orders/opd");
   const rows = appointments.data.filter((a) => !user.doctorId || a.DoctorID === user.doctorId);
+  const [selectedId, setSelectedId] = useState("");
+  const selected = rows.find((item) => String(item.AppointmentID) === String(selectedId)) || rows[0];
+  const selectedTests = tests.data.filter((item) => String(item.AppointmentID) === String(selected?.AppointmentID));
+
+  useEffect(() => {
+    if (!selectedId && rows.length) {
+      setSelectedId(String(rows[0].AppointmentID));
+    }
+  }, [rows, selectedId]);
+
   return (
     <>
       <PageHeader eyebrow="Doctor" title="Appointment Details" icon={CalendarDays} />
-      <DataTable rows={rows} columns={[{ key: "AppointmentID", label: "ID" }, { key: "PatientName", label: "Patient" }, { key: "ChiefComplaint", label: "Complaint" }, { key: "Status", label: "Status" }]} />
+      <section className="workspace-grid">
+        <article className="data-panel">
+          <header><div><CalendarDays size={20} /><h2>Appointment Queue</h2></div><span>{rows.length}</span></header>
+          <Field label="Select appointment">
+            <SelectInput
+              value={selected?.AppointmentID || ""}
+              onChange={(value) => setSelectedId(value)}
+              options={rows.map((item) => ({
+                value: item.AppointmentID,
+                label: `#${item.AppointmentID} ${item.PatientName} - ${new Date(item.AppointmentDate).toLocaleString()}`
+              }))}
+            />
+          </Field>
+          <DataTable rows={rows} columns={[{ key: "AppointmentID", label: "ID" }, { key: "PatientName", label: "Patient" }, { key: "ChiefComplaint", label: "Complaint" }, { key: "Status", label: "Status" }]} />
+        </article>
+        <article className="data-panel wide-panel">
+          <header><div><ClipboardPlus size={20} /><h2>Selected Appointment</h2></div></header>
+          {!selected ? (
+            <p className="muted">No appointment assigned.</p>
+          ) : (
+            <dl className="profile-list compact-list">
+              <div><dt>ID</dt><dd>#{selected.AppointmentID}</dd></div>
+              <div><dt>Patient</dt><dd>{selected.PatientName || "N/A"}</dd></div>
+              <div><dt>Date & time</dt><dd>{selected.AppointmentDate ? new Date(selected.AppointmentDate).toLocaleString() : "N/A"}</dd></div>
+              <div><dt>Type</dt><dd>{selected.AppointmentType || "N/A"}</dd></div>
+              <div><dt>Complaint</dt><dd>{selected.ChiefComplaint || "Not provided"}</dd></div>
+              <div><dt>Status</dt><dd>{selected.Status || "N/A"}</dd></div>
+            </dl>
+          )}
+          <h3 className="panel-subtitle">Ordered Tests</h3>
+          <DataTable
+            rows={selectedTests}
+            empty="No OPD tests ordered for this appointment."
+            columns={[
+              { key: "TestOrderID", label: "Order" },
+              { key: "TestName", label: "Test" },
+              { key: "Status", label: "Status" },
+              { key: "Results", label: "Results" }
+            ]}
+          />
+        </article>
+      </section>
     </>
   );
 }
@@ -849,10 +901,24 @@ export function OrderOpdTests({ user }) {
   const appointments = useApi("/opd/appointments");
   const tests = useApi("/tests");
   const [form, setForm] = useState({ appointmentId: "", testId: "", results: "" });
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const submit = async (event) => {
     event.preventDefault();
+    setMessage("");
+    setError("");
     const selected = appointments.data.find((a) => String(a.AppointmentID) === String(form.appointmentId));
-    await api.post("/tests/orders/opd", { appointmentId: Number(form.appointmentId), patientId: selected.PatientID, testId: Number(form.testId), results: form.results, status: "Ordered" });
+    if (!selected) {
+      setError("Select a valid appointment.");
+      return;
+    }
+    try {
+      await api.post("/tests/orders/opd", { appointmentId: Number(form.appointmentId), patientId: selected.PatientID, testId: Number(form.testId), results: form.results, status: "Ordered" });
+      setMessage("OPD test ordered.");
+      setForm({ appointmentId: "", testId: "", results: "" });
+    } catch (requestError) {
+      setError(requestError.response?.data?.message || "Unable to order OPD test.");
+    }
   };
   const options = appointments.data.filter((a) => !user.doctorId || a.DoctorID === user.doctorId);
   return (
@@ -862,6 +928,8 @@ export function OrderOpdTests({ user }) {
         <Field label="Appointment"><SelectInput value={form.appointmentId} onChange={(v) => setForm((c) => ({ ...c, appointmentId: v }))} options={options.map((a) => ({ value: a.AppointmentID, label: `#${a.AppointmentID} ${a.PatientName}` }))} required /></Field>
         <Field label="Test"><SelectInput value={form.testId} onChange={(v) => setForm((c) => ({ ...c, testId: v }))} options={tests.data.map((t) => ({ value: t.TestID, label: t.TestName }))} required /></Field>
         <button type="submit"><Save size={18} />Order test</button>
+        {message && <p className="success">{message}</p>}
+        {error && <p className="error">{error}</p>}
       </form></article>
     </>
   );
@@ -914,39 +982,61 @@ export function IpdPatients({ user }) {
 export function ProgressNotesPage({ user }) {
   const admissions = useApi("/ipd/admissions");
   const [form, setForm] = useState({ admissionId: "", vitalSigns: "", progressNotes: "" });
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const submit = async (event) => {
     event.preventDefault();
+    setMessage("");
+    setError("");
     // Minimal DB interaction path: reuse IPD diagnosis update as progress update for demo
     const selected = admissions.data.find((a) => String(a.AdmissionID) === String(form.admissionId));
-    await api.put(`/ipd/admissions/${form.admissionId}`, {
-      patientId: selected.PatientID,
-      attendingDoctorId: selected.AttendingDoctorID,
-      bedId: selected.BedID,
-      wardId: selected.WardID,
-      admissionType: selected.AdmissionType,
-      status: selected.Status,
-      clinicalDiagnosis: `${selected.ClinicalDiagnosis || ""}\n[Progress] ${form.vitalSigns} ${form.progressNotes}`
-    });
+    if (!selected) {
+      setError("Select a valid admission.");
+      return;
+    }
+    try {
+      await api.put(`/ipd/admissions/${form.admissionId}`, {
+        patientId: selected.PatientID,
+        attendingDoctorId: selected.AttendingDoctorID,
+        bedId: selected.BedID,
+        wardId: selected.WardID,
+        admissionType: selected.AdmissionType,
+        status: selected.Status,
+        clinicalDiagnosis: `${selected.ClinicalDiagnosis || ""}\n[Progress] ${form.vitalSigns} ${form.progressNotes}`.trim()
+      });
+      setMessage("Vitals/progress entry appended to clinical diagnosis.");
+      setForm({ admissionId: "", vitalSigns: "", progressNotes: "" });
+      admissions.reload();
+    } catch (requestError) {
+      setError(requestError.response?.data?.message || "Unable to save progress note.");
+    }
   };
+  const mine = admissions.data.filter((a) => user.role === "Nurse" || !user.doctorId || a.AttendingDoctorID === user.doctorId);
   return (
     <>
       <PageHeader eyebrow={user.role} title="Add Vitals / Progress Notes" icon={ClipboardPlus} />
       <article className="data-panel form-panel"><form onSubmit={submit}>
-        <Field label="Admission"><SelectInput value={form.admissionId} onChange={(v) => setForm((c) => ({ ...c, admissionId: v }))} options={admissions.data.map((a) => ({ value: a.AdmissionID, label: `#${a.AdmissionID} ${a.PatientName}` }))} required /></Field>
+        <p className="muted">Temporary workflow: this appends entries to the admission clinical diagnosis field until a dedicated nurse notes endpoint is available.</p>
+        <Field label="Admission"><SelectInput value={form.admissionId} onChange={(v) => setForm((c) => ({ ...c, admissionId: v }))} options={mine.map((a) => ({ value: a.AdmissionID, label: `#${a.AdmissionID} ${a.PatientName}` }))} required /></Field>
         <Field label="Vitals"><TextInput value={form.vitalSigns} onChange={(v) => setForm((c) => ({ ...c, vitalSigns: v }))} /></Field>
         <Field label="Progress note"><TextInput value={form.progressNotes} onChange={(v) => setForm((c) => ({ ...c, progressNotes: v }))} /></Field>
         <button type="submit"><Save size={18} />Save note</button>
+        {message && <p className="success">{message}</p>}
+        {error && <p className="error">{error}</p>}
       </form></article>
     </>
   );
 }
 
-export function ViewReviewsPage() {
+export function ViewReviewsPage({ user }) {
   const reviews = useApi("/reviews");
+  const rows = reviews.data.filter((review) => !user?.doctorId || review.DoctorID === user.doctorId);
+  const average = rows.length ? (rows.reduce((sum, row) => sum + Number(row.Rating || 0), 0) / rows.length).toFixed(1) : "0.0";
   return (
     <>
       <PageHeader eyebrow="Doctor" title="View Reviews" icon={Star} />
-      <DataTable rows={reviews.data} columns={[{ key: "ReviewID", label: "ID" }, { key: "PatientName", label: "Patient" }, { key: "DoctorName", label: "Doctor" }, { key: "Rating", label: "Rating" }, { key: "Comments", label: "Comments" }]} />
+      <StatGrid stats={[{ label: "Reviews", value: rows.length }, { label: "Average Rating", value: average }, { label: "5-Star", value: rows.filter((item) => Number(item.Rating) === 5).length }]} />
+      <DataTable rows={rows} columns={[{ key: "ReviewID", label: "ID" }, { key: "PatientName", label: "Patient" }, { key: "Rating", label: "Rating" }, { key: "Comments", label: "Comments" }]} />
     </>
   );
 }
@@ -954,10 +1044,26 @@ export function ViewReviewsPage() {
 export function ReceptionDashboard() {
   const patients = useApi("/patients");
   const appointments = useApi("/opd/appointments");
+  const admissions = useApi("/ipd/admissions");
+  const beds = useApi("/departments/beds");
+  const opdPayments = useApi("/billing/opd-payments", []);
+  const availableBeds = beds.data.filter((bed) => bed.Status === "Available").length;
+  const todayAppointments = appointments.data.filter((item) => new Date(item.AppointmentDate).toDateString() === new Date().toDateString()).length;
+  const opdRevenue = opdPayments.data.reduce((sum, item) => sum + Number(item.PaidAmount || 0), 0);
   return (
     <>
       <PageHeader eyebrow="Receptionist" title="Reception Dashboard" icon={Users} />
-      <StatGrid stats={[{ label: "Patients", value: patients.data.length }, { label: "Appointments", value: appointments.data.length }]} />
+      <StatGrid stats={[{ label: "Patients", value: patients.data.length }, { label: "Appointments", value: appointments.data.length }, { label: "Today OPD", value: todayAppointments }, { label: "IPD Active", value: admissions.data.filter((a) => a.Status === "Admitted").length }, { label: "Available Beds", value: availableBeds }, { label: "OPD Revenue", value: `Rs ${opdRevenue.toLocaleString()}` }]} />
+      <section className="panel-grid">
+        <article className="data-panel">
+          <header><div><CalendarDays size={20} /><h2>Upcoming OPD</h2></div><span>{appointments.data.length}</span></header>
+          <DataTable rows={appointments.data.slice(0, 8)} columns={[{ key: "AppointmentID", label: "ID" }, { key: "PatientName", label: "Patient" }, { key: "DoctorName", label: "Doctor" }, { key: "AppointmentDate", label: "Time", render: (row) => row.AppointmentDate ? new Date(row.AppointmentDate).toLocaleString() : "N/A" }, { key: "Status", label: "Status" }]} />
+        </article>
+        <article className="data-panel">
+          <header><div><BedDouble size={20} /><h2>Recent Admissions</h2></div><span>{admissions.data.length}</span></header>
+          <DataTable rows={admissions.data.slice(0, 8)} columns={[{ key: "AdmissionID", label: "ID" }, { key: "PatientName", label: "Patient" }, { key: "WardName", label: "Ward" }, { key: "BedNumber", label: "Bed" }, { key: "Status", label: "Status" }]} />
+        </article>
+      </section>
     </>
   );
 }
@@ -968,9 +1074,19 @@ export function AdmitPatientPage() {
   const wards = useApi("/departments/wards");
   const beds = useApi("/departments/beds");
   const [form, setForm] = useState({ patientId: "", doctorId: "", wardId: "", bedId: "", admissionType: "Emergency" });
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const submit = async (event) => {
     event.preventDefault();
-    await api.post("/ipd/admissions", { patientId: Number(form.patientId), attendingDoctorId: Number(form.doctorId), wardId: Number(form.wardId), bedId: Number(form.bedId), admissionType: form.admissionType, clinicalDiagnosis: "Reception admission" });
+    setMessage("");
+    setError("");
+    try {
+      await api.post("/ipd/admissions", { patientId: Number(form.patientId), attendingDoctorId: Number(form.doctorId), wardId: Number(form.wardId), bedId: Number(form.bedId), admissionType: form.admissionType, clinicalDiagnosis: "Reception admission" });
+      setMessage("Patient admitted.");
+      setForm({ patientId: "", doctorId: "", wardId: "", bedId: "", admissionType: "Emergency" });
+    } catch (requestError) {
+      setError(requestError.response?.data?.message || "Unable to admit patient.");
+    }
   };
   return (
     <>
@@ -980,35 +1096,116 @@ export function AdmitPatientPage() {
         <Field label="Doctor"><SelectInput value={form.doctorId} onChange={(v) => setForm((c) => ({ ...c, doctorId: v }))} options={doctors.data.map((d) => ({ value: d.DoctorID, label: d.FullName }))} required /></Field>
         <Field label="Ward"><SelectInput value={form.wardId} onChange={(v) => setForm((c) => ({ ...c, wardId: v }))} options={wards.data.map((w) => ({ value: w.WardID, label: w.WardName }))} required /></Field>
         <Field label="Bed"><SelectInput value={form.bedId} onChange={(v) => setForm((c) => ({ ...c, bedId: v }))} options={beds.data.filter((b) => b.Status === "Available").map((b) => ({ value: b.BedID, label: `${b.WardName} ${b.BedNumber}` }))} required /></Field>
+        <Field label="Admission type"><SelectInput value={form.admissionType} onChange={(v) => setForm((c) => ({ ...c, admissionType: v }))} options={["Emergency", "Scheduled", "Observation"].map((item) => ({ value: item, label: item }))} required /></Field>
         <button type="submit"><Save size={18} />Admit patient</button>
+        {message && <p className="success">{message}</p>}
+        {error && <p className="error">{error}</p>}
       </form></article>
     </>
   );
 }
 
 export function AssignBedPage() {
-  return <AdmitPatientPage />;
+  const admissions = useApi("/ipd/admissions");
+  const beds = useApi("/departments/beds");
+  const [form, setForm] = useState({ admissionId: "", bedId: "", status: "Admitted" });
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setMessage("");
+    setError("");
+    const selected = admissions.data.find((item) => String(item.AdmissionID) === String(form.admissionId));
+    const selectedBed = beds.data.find((item) => String(item.BedID) === String(form.bedId));
+    if (!selected || !selectedBed) {
+      setError("Select a valid admission and bed.");
+      return;
+    }
+    try {
+      await api.put(`/ipd/admissions/${form.admissionId}`, {
+        patientId: selected.PatientID,
+        attendingDoctorId: selected.AttendingDoctorID,
+        bedId: selectedBed.BedID,
+        wardId: selectedBed.WardID || selected.WardID,
+        admissionType: selected.AdmissionType,
+        status: form.status,
+        clinicalDiagnosis: selected.ClinicalDiagnosis || ""
+      });
+      await api.put(`/departments/beds/${selectedBed.BedID}/status`, { status: "Occupied" });
+      setMessage("Bed assigned and updated to Occupied.");
+      setForm({ admissionId: "", bedId: "", status: "Admitted" });
+      admissions.reload();
+      beds.reload();
+    } catch (requestError) {
+      setError(requestError.response?.data?.message || "Unable to assign bed.");
+    }
+  };
+
+  const activeAdmissions = admissions.data.filter((item) => item.Status !== "Discharged");
+  const availableBeds = beds.data.filter((item) => item.Status === "Available");
+
+  return (
+    <>
+      <PageHeader eyebrow="Receptionist" title="Assign Bed" icon={BedDouble} />
+      <section className="workspace-grid">
+        <article className="data-panel">
+          <form onSubmit={submit}>
+            <Field label="Admission"><SelectInput value={form.admissionId} onChange={(v) => setForm((c) => ({ ...c, admissionId: v }))} options={activeAdmissions.map((item) => ({ value: item.AdmissionID, label: `#${item.AdmissionID} ${item.PatientName}` }))} required /></Field>
+            <Field label="Bed"><SelectInput value={form.bedId} onChange={(v) => setForm((c) => ({ ...c, bedId: v }))} options={availableBeds.map((item) => ({ value: item.BedID, label: `${item.WardName} - ${item.BedNumber}` }))} required /></Field>
+            <Field label="Admission status"><SelectInput value={form.status} onChange={(v) => setForm((c) => ({ ...c, status: v }))} options={["Admitted", "Transferred"].map((item) => ({ value: item, label: item }))} required /></Field>
+            <button type="submit"><Save size={18} />Assign bed</button>
+            {message && <p className="success">{message}</p>}
+            {error && <p className="error">{error}</p>}
+          </form>
+        </article>
+        <article className="data-panel wide-panel">
+          <header><div><BedDouble size={20} /><h2>Available Beds</h2></div><span>{availableBeds.length}</span></header>
+          <DataTable rows={availableBeds} columns={[{ key: "BedID", label: "ID" }, { key: "WardName", label: "Ward" }, { key: "BedNumber", label: "Bed" }, { key: "BedType", label: "Type" }, { key: "Status", label: "Status" }]} />
+        </article>
+      </section>
+    </>
+  );
 }
 
 export function IpdPatientDetailsPage({ user }) {
   const admissions = useApi("/ipd/admissions");
   const rows = admissions.data.filter((a) => user.role === "Nurse" || !user.doctorId || a.AttendingDoctorID === user.doctorId);
+  const [selectedId, setSelectedId] = useState("");
+  const selected = rows.find((item) => String(item.AdmissionID) === String(selectedId)) || rows[0];
+  useEffect(() => {
+    if (!selectedId && rows.length) {
+      setSelectedId(String(rows[0].AdmissionID));
+    }
+  }, [rows, selectedId]);
   return (
     <>
       <PageHeader eyebrow={user.role} title="IPD Patient Details" icon={BedDouble} />
-      <DataTable
-        rows={rows}
-        columns={[
-          { key: "AdmissionID", label: "Admission" },
-          { key: "PatientName", label: "Patient" },
-          { key: "DoctorName", label: "Doctor" },
-          { key: "WardName", label: "Ward" },
-          { key: "BedNumber", label: "Bed" },
-          { key: "AdmissionType", label: "Type" },
-          { key: "ClinicalDiagnosis", label: "Diagnosis" },
-          { key: "Status", label: "Status" }
-        ]}
-      />
+      <section className="workspace-grid">
+        <article className="data-panel">
+          <header><div><BedDouble size={20} /><h2>IPD Admissions</h2></div><span>{rows.length}</span></header>
+          <Field label="Select patient admission">
+            <SelectInput value={selected?.AdmissionID || ""} onChange={(value) => setSelectedId(value)} options={rows.map((item) => ({ value: item.AdmissionID, label: `#${item.AdmissionID} ${item.PatientName}` }))} />
+          </Field>
+          <DataTable rows={rows} columns={[{ key: "AdmissionID", label: "Admission" }, { key: "PatientName", label: "Patient" }, { key: "WardName", label: "Ward" }, { key: "BedNumber", label: "Bed" }, { key: "Status", label: "Status" }]} />
+        </article>
+        <article className="data-panel wide-panel">
+          <header><div><Activity size={20} /><h2>Admission Detail</h2></div></header>
+          {!selected ? (
+            <p className="muted">No admission record available.</p>
+          ) : (
+            <dl className="profile-list compact-list">
+              <div><dt>Admission ID</dt><dd>#{selected.AdmissionID}</dd></div>
+              <div><dt>Patient</dt><dd>{selected.PatientName || "N/A"}</dd></div>
+              <div><dt>Attending doctor</dt><dd>{selected.DoctorName || "N/A"}</dd></div>
+              <div><dt>Ward / Bed</dt><dd>{`${selected.WardName || "N/A"} / ${selected.BedNumber || "N/A"}`}</dd></div>
+              <div><dt>Type</dt><dd>{selected.AdmissionType || "N/A"}</dd></div>
+              <div><dt>Status</dt><dd>{selected.Status || "N/A"}</dd></div>
+              <div><dt>Diagnosis</dt><dd>{selected.ClinicalDiagnosis || "No diagnosis recorded."}</dd></div>
+            </dl>
+          )}
+        </article>
+      </section>
     </>
   );
 }
@@ -1096,12 +1293,19 @@ export function OrderIpdTestsPage({ user }) {
   );
 }
 
-export function AssignedWardPage() {
+export function AssignedWardPage({ user }) {
   const admissions = useApi("/ipd/admissions");
+  const roster = useApi("/departments/duty-roster", []);
+  const myShifts = roster.data.filter((item) => !user?.userId || String(item.UserID) === String(user.userId));
+  const wardNames = [...new Set(myShifts.map((item) => item.DepartmentName).filter(Boolean))];
+  const rows = wardNames.length
+    ? admissions.data.filter((item) => wardNames.includes(item.WardName))
+    : admissions.data;
   return (
     <>
       <PageHeader eyebrow="Nurse" title="Assigned Ward View" icon={BedDouble} />
-      <DataTable rows={admissions.data} columns={[{ key: "WardName", label: "Ward" }, { key: "BedNumber", label: "Bed" }, { key: "PatientName", label: "Patient" }, { key: "Status", label: "Status" }]} />
+      <p className="muted">Showing patients from wards mapped to your duty roster; if roster-ward mapping is unavailable, all active admissions are shown.</p>
+      <DataTable rows={rows} columns={[{ key: "AdmissionID", label: "Admission" }, { key: "WardName", label: "Ward" }, { key: "BedNumber", label: "Bed" }, { key: "PatientName", label: "Patient" }, { key: "Status", label: "Status" }]} />
     </>
   );
 }
@@ -1110,11 +1314,18 @@ export function BedStatusPage() {
   const beds = useApi("/departments/beds");
   const [form, setForm] = useState({ bedId: "", status: "Available" });
   const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
   const submit = async (event) => {
     event.preventDefault();
-    await api.patch(`/departments/beds/${form.bedId}/status`, { status: form.status });
-    setMessage("Bed status updated.");
-    beds.reload();
+    setMessage("");
+    setError("");
+    try {
+      await api.put(`/departments/beds/${form.bedId}/status`, { status: form.status });
+      setMessage("Bed status updated.");
+      beds.reload();
+    } catch (requestError) {
+      setError(requestError.response?.data?.message || "Unable to update bed status.");
+    }
   };
   return (
     <>
@@ -1126,6 +1337,7 @@ export function BedStatusPage() {
             <Field label="Status"><SelectInput value={form.status} onChange={(v) => setForm((c) => ({ ...c, status: v }))} options={["Available", "Occupied", "Maintenance"].map((s) => ({ value: s, label: s }))} required /></Field>
             <button type="submit"><Save size={18} />Update status</button>
             {message && <p className="success">{message}</p>}
+            {error && <p className="error">{error}</p>}
           </form>
         </article>
         <article className="data-panel wide-panel">
@@ -1142,6 +1354,7 @@ export function NurseDutyRosterPage({ user }) {
   return (
     <>
       <PageHeader eyebrow="Nurse" title="Duty Roster View" icon={CalendarDays} />
+      <p className="muted">Read-only roster view for nurses. Shift changes are managed by Admin in Duty Roster Management.</p>
       <DataTable rows={rows} columns={[{ key: "RosterID", label: "ID" }, { key: "DepartmentName", label: "Department" }, { key: "ShiftDate", label: "Date" }, { key: "ShiftType", label: "Shift" }, { key: "Status", label: "Status" }]} />
     </>
   );
