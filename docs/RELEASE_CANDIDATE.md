@@ -128,7 +128,36 @@ Backend default URL: `http://127.0.0.1:5001`
 - [ ] Frontend production build passes:
   - [ ] `cd frontend && npm run build`
 
-## 5) Push / PR Checklist
+## 5) Final QA Evidence (2026-05-02)
+
+### API-level pass (receptionist gap closed)
+- `POST /api/auth/login` as Receptionist: `200`
+- `GET /api/patients`: `200`
+- `GET /api/opd/appointments`: `200`
+- `GET /api/billing/opd-payments`: `200`
+- `GET /api/ipd/admissions`: `200`
+- `GET /api/departments/beds`: `200`
+- `POST /api/opd/appointments` (Receptionist): `201`
+- `POST /api/billing/opd-payments` with `details[]` (Receptionist): `201`
+- `POST /api/ipd/admissions` (Receptionist): `201`
+- `PUT /api/departments/beds/:id/status` (Receptionist): `200`
+
+### Browser-level pass
+- Receptionist login succeeds at `http://127.0.0.1:5173`
+- Receptionist sidebar + dashboards render without new console errors
+- Navigation pass for:
+  - Reception Dashboard
+  - Register Patient
+  - Book OPD Appointment
+  - Admit Patient
+  - Assign Bed
+  - Record Payment
+
+### Browser automation caveat
+- In the in-app browser automation runtime, native date/datetime controls can block deterministic submit automation (form-level required prompts persist even with scripted fills on some runs).
+- Because of that, final save success for date-driven UI submits was validated at API level and by page-state data refresh, not only by toast text assertions.
+
+## 6) Push / PR Checklist
 
 - [ ] Pull latest target branch and resolve conflicts locally.
 - [ ] Re-run frontend build and smoke role flows.
