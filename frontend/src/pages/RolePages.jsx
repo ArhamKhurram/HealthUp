@@ -43,6 +43,15 @@ const emptyDoctor = {
   consultationFee: 0
 };
 
+const emptyUser = {
+  fullName: "",
+  email: "",
+  password: "password",
+  role: "Nurse",
+  phone: "",
+  address: ""
+};
+
 function useApi(path, fallback = []) {
   const [state, setState] = useState({ loading: true, error: "", data: fallback });
 
@@ -643,10 +652,20 @@ export function NurseDashboard() {
 export function DepartmentsManagement() {
   const departments = useApi("/departments");
   const [form, setForm] = useState({ departmentName: "", departmentType: "", location: "" });
+  const [editForm, setEditForm] = useState({ departmentId: "", departmentName: "", departmentType: "", location: "" });
   const submit = async (event) => {
     event.preventDefault();
     await api.post("/departments", form);
     setForm({ departmentName: "", departmentType: "", location: "" });
+    departments.reload();
+  };
+  const updateDepartment = async (event) => {
+    event.preventDefault();
+    await api.put(`/departments/${editForm.departmentId}`, {
+      departmentName: editForm.departmentName,
+      departmentType: editForm.departmentType,
+      location: editForm.location
+    });
     departments.reload();
   };
   return (
@@ -659,6 +678,23 @@ export function DepartmentsManagement() {
             <Field label="Department type"><TextInput value={form.departmentType} onChange={(value) => setForm((c) => ({ ...c, departmentType: value }))} required /></Field>
             <Field label="Location"><TextInput value={form.location} onChange={(value) => setForm((c) => ({ ...c, location: value }))} /></Field>
             <button type="submit"><Save size={18} />Create department</button>
+          </form>
+        </article>
+        <article className="data-panel">
+          <form onSubmit={updateDepartment}>
+            <Field label="Department"><SelectInput value={editForm.departmentId} onChange={(value) => {
+              const selected = departments.data.find((department) => String(department.DepartmentID) === String(value));
+              setEditForm({
+                departmentId: value,
+                departmentName: selected?.DepartmentName || "",
+                departmentType: selected?.DepartmentType || "",
+                location: selected?.Location || ""
+              });
+            }} options={departments.data.map((department) => ({ value: department.DepartmentID, label: department.DepartmentName }))} required /></Field>
+            <Field label="Department name"><TextInput value={editForm.departmentName} onChange={(value) => setEditForm((current) => ({ ...current, departmentName: value }))} required /></Field>
+            <Field label="Department type"><TextInput value={editForm.departmentType} onChange={(value) => setEditForm((current) => ({ ...current, departmentType: value }))} required /></Field>
+            <Field label="Location"><TextInput value={editForm.location} onChange={(value) => setEditForm((current) => ({ ...current, location: value }))} /></Field>
+            <button type="submit"><Save size={18} />Update department</button>
           </form>
         </article>
         <article className="data-panel wide-panel">
@@ -680,6 +716,7 @@ export function WardsBedsManagement() {
   const departments = useApi("/departments");
   const [wardForm, setWardForm] = useState({ departmentId: "", wardName: "", wardType: "", totalBeds: 1, dailyCharges: 0 });
   const [bedForm, setBedForm] = useState({ wardId: "", bedNumber: "", bedType: "", status: "Available", dailyCharges: 0 });
+  const [statusForm, setStatusForm] = useState({ bedId: "", status: "Available" });
 
   const createWard = async (event) => {
     event.preventDefault();
@@ -689,6 +726,11 @@ export function WardsBedsManagement() {
   const createBed = async (event) => {
     event.preventDefault();
     await api.post("/departments/beds", { ...bedForm, wardId: Number(bedForm.wardId), dailyCharges: Number(bedForm.dailyCharges) });
+    beds.reload();
+  };
+  const updateBedStatus = async (event) => {
+    event.preventDefault();
+    await api.put(`/departments/beds/${statusForm.bedId}/status`, { status: statusForm.status });
     beds.reload();
   };
   return (
@@ -711,6 +753,14 @@ export function WardsBedsManagement() {
             <Field label="Bed number"><TextInput value={bedForm.bedNumber} onChange={(value) => setBedForm((c) => ({ ...c, bedNumber: value }))} required /></Field>
             <Field label="Bed type"><TextInput value={bedForm.bedType} onChange={(value) => setBedForm((c) => ({ ...c, bedType: value }))} required /></Field>
             <button type="submit"><Save size={18} />Create bed</button>
+          </form>
+        </article>
+        <article className="data-panel">
+          <header><div><BedDouble size={20} /><h2>Update Bed Status</h2></div></header>
+          <form onSubmit={updateBedStatus}>
+            <Field label="Bed"><SelectInput value={statusForm.bedId} onChange={(value) => setStatusForm((current) => ({ ...current, bedId: value }))} options={beds.data.map((bed) => ({ value: bed.BedID, label: `${bed.WardName} - ${bed.BedNumber}` }))} required /></Field>
+            <Field label="Status"><SelectInput value={statusForm.status} onChange={(value) => setStatusForm((current) => ({ ...current, status: value }))} options={["Available", "Occupied", "Maintenance"].map((status) => ({ value: status, label: status }))} required /></Field>
+            <button type="submit"><Save size={18} />Update bed status</button>
           </form>
         </article>
       </section>
@@ -752,8 +802,15 @@ export function OpdRoomsManagement() {
 export function DutyRosterManagement() {
   const users = useApi("/users");
   const departments = useApi("/departments");
+  const nurses = useApi("/departments/nurses");
   const roster = useApi("/departments/duty-roster");
+  const [nurseForm, setNurseForm] = useState({ userId: "", departmentId: "", shiftTime: "", nurseType: "", certification: "" });
   const [form, setForm] = useState({ userId: "", departmentId: "", shiftDate: "", shiftType: "" });
+  const submitNurse = async (event) => {
+    event.preventDefault();
+    await api.post("/departments/nurses", { ...nurseForm, userId: Number(nurseForm.userId), departmentId: Number(nurseForm.departmentId) });
+    nurses.reload();
+  };
   const submit = async (event) => {
     event.preventDefault();
     await api.post("/departments/duty-roster", { ...form, userId: Number(form.userId), departmentId: Number(form.departmentId) });
@@ -761,8 +818,18 @@ export function DutyRosterManagement() {
   };
   return (
     <>
-      <PageHeader eyebrow="Admin/Nurse" title="Duty Roster Management" icon={CalendarDays} />
+      <PageHeader eyebrow="Admin/Nurse" title="Manage Nurses & Duty Roster" icon={CalendarDays} />
       <section className="workspace-grid">
+        <article className="data-panel">
+          <form onSubmit={submitNurse}>
+            <Field label="Nurse user"><SelectInput value={nurseForm.userId} onChange={(value) => setNurseForm((current) => ({ ...current, userId: value }))} options={users.data.filter((user) => user.Role === "Nurse").map((user) => ({ value: user.UserID, label: user.FullName }))} required /></Field>
+            <Field label="Department"><SelectInput value={nurseForm.departmentId} onChange={(value) => setNurseForm((current) => ({ ...current, departmentId: value }))} options={departments.data.map((department) => ({ value: department.DepartmentID, label: department.DepartmentName }))} required /></Field>
+            <Field label="Shift time"><TextInput value={nurseForm.shiftTime} onChange={(value) => setNurseForm((current) => ({ ...current, shiftTime: value }))} /></Field>
+            <Field label="Nurse type"><TextInput value={nurseForm.nurseType} onChange={(value) => setNurseForm((current) => ({ ...current, nurseType: value }))} /></Field>
+            <Field label="Certification"><TextInput value={nurseForm.certification} onChange={(value) => setNurseForm((current) => ({ ...current, certification: value }))} /></Field>
+            <button type="submit"><Save size={18} />Add nurse profile</button>
+          </form>
+        </article>
         <article className="data-panel">
           <form onSubmit={submit}>
             <Field label="Staff user"><SelectInput value={form.userId} onChange={(value) => setForm((c) => ({ ...c, userId: value }))} options={users.data.map((u) => ({ value: u.UserID, label: `${u.FullName} (${u.Role})` }))} required /></Field>
@@ -772,8 +839,201 @@ export function DutyRosterManagement() {
             <button type="submit"><Save size={18} />Assign shift</button>
           </form>
         </article>
-        <article className="data-panel wide-panel"><DataTable rows={roster.data} columns={[{ key: "RosterID", label: "ID" }, { key: "FullName", label: "Staff" }, { key: "DepartmentName", label: "Department" }, { key: "ShiftDate", label: "Date" }, { key: "ShiftType", label: "Shift" }]} /></article>
       </section>
+      <section className="panel-grid">
+        <article className="data-panel"><h2>Nurses</h2><DataTable rows={nurses.data} columns={[{ key: "NurseID", label: "ID" }, { key: "FullName", label: "Nurse" }, { key: "DepartmentName", label: "Department" }, { key: "ShiftTime", label: "Shift Time" }, { key: "NurseType", label: "Type" }]} /></article>
+        <article className="data-panel"><h2>Duty Roster</h2><DataTable rows={roster.data} columns={[{ key: "RosterID", label: "ID" }, { key: "FullName", label: "Staff" }, { key: "DepartmentName", label: "Department" }, { key: "ShiftDate", label: "Date" }, { key: "ShiftType", label: "Shift" }]} /></article>
+      </section>
+    </>
+  );
+}
+
+export function ManageUsersPage() {
+  const users = useApi("/users");
+  const [form, setForm] = useState(emptyUser);
+  const [editForm, setEditForm] = useState({ userId: "", fullName: "", email: "", role: "", phone: "", address: "", isActive: true, password: "" });
+  const submit = async (event) => {
+    event.preventDefault();
+    await api.post("/users", form);
+    users.reload();
+  };
+  const updateUser = async (event) => {
+    event.preventDefault();
+    await api.put(`/users/${editForm.userId}`, {
+      fullName: editForm.fullName,
+      email: editForm.email,
+      role: editForm.role,
+      phone: editForm.phone,
+      address: editForm.address,
+      isActive: editForm.isActive,
+      password: editForm.password || undefined
+    });
+    users.reload();
+  };
+  return (
+    <>
+      <PageHeader eyebrow="Admin" title="Manage Users" icon={Users} />
+      <section className="workspace-grid">
+        <article className="data-panel">
+          <form onSubmit={submit}>
+            <Field label="Full name"><TextInput value={form.fullName} onChange={(value) => setForm((current) => ({ ...current, fullName: value }))} required /></Field>
+            <Field label="Email"><TextInput type="email" value={form.email} onChange={(value) => setForm((current) => ({ ...current, email: value }))} required /></Field>
+            <Field label="Password"><TextInput type="password" value={form.password} onChange={(value) => setForm((current) => ({ ...current, password: value }))} required /></Field>
+            <Field label="Role"><SelectInput value={form.role} onChange={(value) => setForm((current) => ({ ...current, role: value }))} options={["Admin", "Receptionist", "Doctor", "Nurse", "Patient"].map((role) => ({ value: role, label: role }))} required /></Field>
+            <button type="submit"><Save size={18} />Create user</button>
+          </form>
+        </article>
+        <article className="data-panel">
+          <form onSubmit={updateUser}>
+            <Field label="User"><SelectInput value={editForm.userId} onChange={(value) => {
+              const selected = users.data.find((user) => String(user.UserID) === String(value));
+              setEditForm({
+                userId: value,
+                fullName: selected?.FullName || "",
+                email: selected?.Email || "",
+                role: selected?.Role || "",
+                phone: selected?.Phone || "",
+                address: selected?.Address || "",
+                isActive: selected?.IsActive ?? true,
+                password: ""
+              });
+            }} options={users.data.map((user) => ({ value: user.UserID, label: `${user.FullName} (${user.Role})` }))} required /></Field>
+            <Field label="Full name"><TextInput value={editForm.fullName} onChange={(value) => setEditForm((current) => ({ ...current, fullName: value }))} required /></Field>
+            <Field label="Email"><TextInput type="email" value={editForm.email} onChange={(value) => setEditForm((current) => ({ ...current, email: value }))} required /></Field>
+            <Field label="Role"><SelectInput value={editForm.role} onChange={(value) => setEditForm((current) => ({ ...current, role: value }))} options={["Admin", "Receptionist", "Doctor", "Nurse", "Patient"].map((role) => ({ value: role, label: role }))} required /></Field>
+            <Field label="Password (optional)"><TextInput type="password" value={editForm.password} onChange={(value) => setEditForm((current) => ({ ...current, password: value }))} /></Field>
+            <button type="submit"><Save size={18} />Update user</button>
+          </form>
+        </article>
+      </section>
+      <article className="data-panel wide-panel">
+        <DataTable rows={users.data} columns={[{ key: "UserID", label: "ID" }, { key: "FullName", label: "Name" }, { key: "Email", label: "Email" }, { key: "Role", label: "Role" }, { key: "IsActive", label: "Active" }]} />
+      </article>
+    </>
+  );
+}
+
+export function MedicationsManagement() {
+  const medications = useApi("/pharmacy/medications");
+  const [form, setForm] = useState({ medicationName: "", genericName: "", category: "", unitPrice: 0, form: "", quantityInStock: 0, minimumStockLevel: 0, reorderLevel: 0, expiryDate: "" });
+  const [editForm, setEditForm] = useState({ medicationId: "", medicationName: "", genericName: "", category: "", unitPrice: 0, form: "", quantityInStock: 0, minimumStockLevel: 0, reorderLevel: 0, expiryDate: "" });
+  const createMedication = async (event) => {
+    event.preventDefault();
+    await api.post("/pharmacy/medications", { ...form, unitPrice: Number(form.unitPrice), quantityInStock: Number(form.quantityInStock), minimumStockLevel: Number(form.minimumStockLevel), reorderLevel: Number(form.reorderLevel) });
+    medications.reload();
+  };
+  const updateMedication = async (event) => {
+    event.preventDefault();
+    await api.put(`/pharmacy/medications/${editForm.medicationId}`, { ...editForm, unitPrice: Number(editForm.unitPrice), quantityInStock: Number(editForm.quantityInStock), minimumStockLevel: Number(editForm.minimumStockLevel), reorderLevel: Number(editForm.reorderLevel) });
+    medications.reload();
+  };
+  return (
+    <>
+      <PageHeader eyebrow="Admin" title="Medications Management" icon={Pill} />
+      <section className="workspace-grid">
+        <article className="data-panel">
+          <form onSubmit={createMedication}>
+            <Field label="Medication name"><TextInput value={form.medicationName} onChange={(value) => setForm((current) => ({ ...current, medicationName: value }))} required /></Field>
+            <Field label="Category"><TextInput value={form.category} onChange={(value) => setForm((current) => ({ ...current, category: value }))} /></Field>
+            <Field label="Unit price"><TextInput type="number" value={form.unitPrice} onChange={(value) => setForm((current) => ({ ...current, unitPrice: value }))} required /></Field>
+            <Field label="In stock"><TextInput type="number" value={form.quantityInStock} onChange={(value) => setForm((current) => ({ ...current, quantityInStock: value }))} /></Field>
+            <button type="submit"><Save size={18} />Create medication</button>
+          </form>
+        </article>
+        <article className="data-panel">
+          <form onSubmit={updateMedication}>
+            <Field label="Medication"><SelectInput value={editForm.medicationId} onChange={(value) => {
+              const selected = medications.data.find((medication) => String(medication.MedicationID) === String(value));
+              setEditForm({
+                medicationId: value,
+                medicationName: selected?.MedicationName || "",
+                genericName: selected?.GenericName || "",
+                category: selected?.Category || "",
+                unitPrice: selected?.UnitPrice || 0,
+                form: selected?.Form || "",
+                quantityInStock: selected?.QuantityInStock || 0,
+                minimumStockLevel: selected?.MinimumStockLevel || 0,
+                reorderLevel: selected?.ReorderLevel || 0,
+                expiryDate: selected?.ExpiryDate ? String(selected.ExpiryDate).slice(0, 10) : ""
+              });
+            }} options={medications.data.map((medication) => ({ value: medication.MedicationID, label: medication.MedicationName }))} required /></Field>
+            <Field label="Medication name"><TextInput value={editForm.medicationName} onChange={(value) => setEditForm((current) => ({ ...current, medicationName: value }))} required /></Field>
+            <Field label="Unit price"><TextInput type="number" value={editForm.unitPrice} onChange={(value) => setEditForm((current) => ({ ...current, unitPrice: value }))} required /></Field>
+            <Field label="In stock"><TextInput type="number" value={editForm.quantityInStock} onChange={(value) => setEditForm((current) => ({ ...current, quantityInStock: value }))} /></Field>
+            <button type="submit"><Save size={18} />Update medication</button>
+          </form>
+        </article>
+      </section>
+      <article className="data-panel wide-panel">
+        <DataTable rows={medications.data} columns={[{ key: "MedicationID", label: "ID" }, { key: "MedicationName", label: "Medication" }, { key: "Category", label: "Category" }, { key: "UnitPrice", label: "Price" }, { key: "QuantityInStock", label: "Stock" }]} />
+      </article>
+    </>
+  );
+}
+
+export function MedicalTestsManagement() {
+  const tests = useApi("/tests");
+  const [form, setForm] = useState({ testName: "", testCode: "", category: "", cost: 0 });
+  const [editForm, setEditForm] = useState({ testId: "", testName: "", testCode: "", category: "", cost: 0 });
+  const createTest = async (event) => {
+    event.preventDefault();
+    await api.post("/tests", { ...form, cost: Number(form.cost) });
+    tests.reload();
+  };
+  const updateTest = async (event) => {
+    event.preventDefault();
+    await api.put(`/tests/${editForm.testId}`, { testName: editForm.testName, testCode: editForm.testCode, category: editForm.category, cost: Number(editForm.cost) });
+    tests.reload();
+  };
+  return (
+    <>
+      <PageHeader eyebrow="Admin" title="Medical Tests Management" icon={FlaskConical} />
+      <section className="workspace-grid">
+        <article className="data-panel">
+          <form onSubmit={createTest}>
+            <Field label="Test name"><TextInput value={form.testName} onChange={(value) => setForm((current) => ({ ...current, testName: value }))} required /></Field>
+            <Field label="Code"><TextInput value={form.testCode} onChange={(value) => setForm((current) => ({ ...current, testCode: value }))} required /></Field>
+            <Field label="Category"><TextInput value={form.category} onChange={(value) => setForm((current) => ({ ...current, category: value }))} required /></Field>
+            <Field label="Cost"><TextInput type="number" value={form.cost} onChange={(value) => setForm((current) => ({ ...current, cost: value }))} required /></Field>
+            <button type="submit"><Save size={18} />Create test</button>
+          </form>
+        </article>
+        <article className="data-panel">
+          <form onSubmit={updateTest}>
+            <Field label="Test"><SelectInput value={editForm.testId} onChange={(value) => {
+              const selected = tests.data.find((test) => String(test.TestID) === String(value));
+              setEditForm({ testId: value, testName: selected?.TestName || "", testCode: selected?.TestCode || "", category: selected?.Category || "", cost: selected?.Cost || 0 });
+            }} options={tests.data.map((test) => ({ value: test.TestID, label: test.TestName }))} required /></Field>
+            <Field label="Test name"><TextInput value={editForm.testName} onChange={(value) => setEditForm((current) => ({ ...current, testName: value }))} required /></Field>
+            <Field label="Code"><TextInput value={editForm.testCode} onChange={(value) => setEditForm((current) => ({ ...current, testCode: value }))} required /></Field>
+            <Field label="Category"><TextInput value={editForm.category} onChange={(value) => setEditForm((current) => ({ ...current, category: value }))} required /></Field>
+            <Field label="Cost"><TextInput type="number" value={editForm.cost} onChange={(value) => setEditForm((current) => ({ ...current, cost: value }))} required /></Field>
+            <button type="submit"><Save size={18} />Update test</button>
+          </form>
+        </article>
+      </section>
+      <article className="data-panel wide-panel">
+        <DataTable rows={tests.data} columns={[{ key: "TestID", label: "ID" }, { key: "TestName", label: "Name" }, { key: "TestCode", label: "Code" }, { key: "Category", label: "Category" }, { key: "Cost", label: "Cost" }]} />
+      </article>
+    </>
+  );
+}
+
+export function ReportsPage() {
+  const patients = useApi("/reports/patients");
+  const appointments = useApi("/reports/opd-appointments");
+  const billing = useApi("/reports/billing");
+  return (
+    <>
+      <PageHeader eyebrow="Admin" title="Reports" icon={Activity} />
+      <section className="panel-grid">
+        <article className="data-panel"><h2>Patient Directory</h2><DataTable rows={patients.data} columns={[{ key: "PatientID", label: "Patient ID" }, { key: "FullName", label: "Name" }, { key: "Email", label: "Email" }]} /></article>
+        <article className="data-panel"><h2>OPD Appointments</h2><DataTable rows={appointments.data} columns={[{ key: "AppointmentID", label: "Appt ID" }, { key: "PatientName", label: "Patient" }, { key: "DoctorName", label: "Doctor" }, { key: "Status", label: "Status" }]} /></article>
+      </section>
+      <article className="data-panel wide-panel">
+        <h2>Billing Summary</h2>
+        <DataTable rows={billing.data} columns={[{ key: "PaymentID", label: "Payment ID" }, { key: "BillingType", label: "Type" }, { key: "PatientName", label: "Patient" }, { key: "PaidAmount", label: "Paid" }, { key: "Status", label: "Status" }]} />
+      </article>
     </>
   );
 }
@@ -1148,6 +1408,22 @@ export function NurseDutyRosterPage({ user }) {
 }
 
 export function PlaceholderPage({ title, role }) {
+  if (role === "Admin" && title === "Manage Users") return <ManageUsersPage />;
+  if (role === "Admin" && title === "Medications") return <MedicationsManagement />;
+  if (role === "Admin" && title === "Medical Tests") return <MedicalTestsManagement />;
+  if (role === "Admin" && title === "Reports") return <ReportsPage />;
+  if (role === "Admin" && title === "Inventory") {
+    return (
+      <>
+        <PageHeader eyebrow={role} title={title} icon={Pill} />
+        <article className="data-panel form-panel">
+          <p className="muted">Inventory management endpoint is not available yet. Medication stock changes are currently handled through Medications.</p>
+          <button type="button" className="disabled-action" disabled>Adjust stock (coming soon)</button>
+          <button type="button" className="disabled-action" disabled>Receive shipment (coming soon)</button>
+        </article>
+      </>
+    );
+  }
   return (
     <>
       <PageHeader eyebrow={role} title={title} icon={Activity} />

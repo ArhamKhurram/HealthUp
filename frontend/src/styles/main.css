@@ -324,6 +324,13 @@ main {
   font-weight: 800;
 }
 
+.disabled-action {
+  justify-content: flex-start;
+  background: #e7eeee;
+  color: #536564;
+  cursor: not-allowed;
+}
+
 .profile-list {
   display: grid;
   gap: 12px;
