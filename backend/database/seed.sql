@@ -11,7 +11,8 @@ BEGIN
         ('System Admin', 'admin@healthup.test', @PasswordHash, 'Admin', '0300-0000000', 'HealthUp Admin Office'),
         ('Sara Khan', 'patient@healthup.test', @PasswordHash, 'Patient', '0301-1111111', 'Lahore'),
         ('Dr. Ahmed Raza', 'doctor@healthup.test', @PasswordHash, 'Doctor', '0302-2222222', 'Lahore'),
-        ('Nurse Fatima Noor', 'nurse@healthup.test', @PasswordHash, 'Nurse', '0303-3333333', 'Lahore');
+        ('Nurse Fatima Noor', 'nurse@healthup.test', @PasswordHash, 'Nurse', '0303-3333333', 'Lahore'),
+        ('Ali Hassan', 'reception@healthup.test', @PasswordHash, 'Receptionist', '0305-5555555', 'Front Desk');
 
     INSERT INTO Departments (DepartmentName, DepartmentType, Location, HeadOfDepartment, ContactNumber)
     VALUES
@@ -75,5 +76,18 @@ BEGIN
     FROM Patients p
     CROSS JOIN Doctors d
     CROSS JOIN OPDRooms r;
+
+    -- Seed initial doctor reviews for demo/reporting.
+    INSERT INTO Reviews (PatientID, DoctorID, Rating, Comments)
+    SELECT p.PatientID, d.DoctorID, v.Rating, v.Comments
+    FROM Patients p
+    CROSS JOIN Doctors d
+    CROSS JOIN (VALUES
+        (5, N'Excellent care and clear explanation.'),
+        (4, N'Good consultation and follow-up guidance.'),
+        (5, N'Very professional and attentive.'),
+        (4, N'Helpful treatment plan and advice.'),
+        (5, N'Highly satisfied with overall experience.')
+    ) v(Rating, Comments);
 END
 GO

@@ -23,23 +23,34 @@ const listAppointments = asyncHandler(async (req, res) => {
 const createAppointment = asyncHandler(async (req, res) => {
   const { patientId, doctorId, roomId, appointmentDate, appointmentType, chiefComplaint } = req.body;
 
+  if (!patientId || !doctorId || !appointmentDate || !appointmentType) {
+    return res.status(400).json({ message: "Patient, doctor, appointment date, and appointment type are required" });
+  }
+
   const pool = await getPool();
-  const result = await pool
+  const created = await pool
     .request()
     .input("PatientID", sql.Int, patientId)
     .input("DoctorID", sql.Int, doctorId)
     .input("RoomID", sql.Int, roomId || null)
     .input("AppointmentDate", sql.DateTime2, appointmentDate)
-    .input("AppointmentType", sql.NVarChar(50), appointmentType || "Consultation")
+    .input("AppointmentType", sql.NVarChar(50), appointmentType)
     .input("ChiefComplaint", sql.NVarChar(sql.MAX), chiefComplaint || null)
     .query(`
-      INSERT INTO OPDAppointments
-        (PatientID, DoctorID, RoomID, AppointmentDate, AppointmentType, Status, ChiefComplaint, TokenNumber)
-      OUTPUT INSERTED.*
-      VALUES
-        (@PatientID, @DoctorID, @RoomID, @AppointmentDate, @AppointmentType, 'Pending', @ChiefComplaint,
-         NEXT VALUE FOR OPDTokenSequence)
+      EXEC sp_BookOPDAppointment
+        @PatientID = @PatientID,
+        @DoctorID = @DoctorID,
+        @RoomID = @RoomID,
+        @AppointmentDate = @AppointmentDate,
+        @AppointmentType = @AppointmentType,
+        @ChiefComplaint = @ChiefComplaint
     `);
+
+  const appointmentId = created.recordset[0]?.AppointmentID;
+  const result = await pool
+    .request()
+    .input("AppointmentID", sql.Int, appointmentId)
+    .query("SELECT * FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
 
   res.status(201).json(result.recordset[0]);
 });
@@ -161,7 +172,7 @@ const createPrescription = asyncHandler(async (req, res) => {
   }
 
   const pool = await getPool();
-  const result = await pool
+  const created = await pool
     .request()
     .input("AppointmentID", sql.Int, appointmentId)
     .input("PatientID", sql.Int, patientId)
@@ -169,10 +180,19 @@ const createPrescription = asyncHandler(async (req, res) => {
     .input("PrescriptionDate", sql.Date, prescriptionDate || null)
     .input("Diagnosis", sql.NVarChar(sql.MAX), diagnosis || null)
     .query(`
-      INSERT INTO OPDPrescriptions (AppointmentID, PatientID, DoctorID, PrescriptionDate, Diagnosis)
-      OUTPUT INSERTED.*
-      VALUES (@AppointmentID, @PatientID, @DoctorID, COALESCE(@PrescriptionDate, CONVERT(DATE, GETDATE())), @Diagnosis)
+      EXEC sp_AddOPDPrescription
+        @AppointmentID = @AppointmentID,
+        @PatientID = @PatientID,
+        @DoctorID = @DoctorID,
+        @PrescriptionDate = @PrescriptionDate,
+        @Diagnosis = @Diagnosis
     `);
+
+  const prescriptionId = created.recordset[0]?.PrescriptionID;
+  const result = await pool
+    .request()
+    .input("PrescriptionID", sql.Int, prescriptionId)
+    .query("SELECT * FROM OPDPrescriptions WHERE PrescriptionID = @PrescriptionID");
 
   res.status(201).json(result.recordset[0]);
 });

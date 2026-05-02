@@ -12,6 +12,7 @@ const pharmacyRoutes = require("./routes/pharmacy.routes");
 const testRoutes = require("./routes/test.routes");
 const billingRoutes = require("./routes/billing.routes");
 const reviewRoutes = require("./routes/review.routes");
+const reportsRoutes = require("./routes/reports.routes");
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.use("/api/pharmacy", pharmacyRoutes);
 app.use("/api/tests", testRoutes);
 app.use("/api/billing", billingRoutes);
 app.use("/api/reviews", reviewRoutes);
+app.use("/api/reports", reportsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ message: "Route not found" });

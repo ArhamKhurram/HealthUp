@@ -143,7 +143,7 @@ const createOPDTestOrder = asyncHandler(async (req, res) => {
   }
 
   const pool = await getPool();
-  const result = await pool
+  const created = await pool
     .request()
     .input("AppointmentID", sql.Int, appointmentId)
     .input("PatientID", sql.Int, patientId)
@@ -151,10 +151,19 @@ const createOPDTestOrder = asyncHandler(async (req, res) => {
     .input("Status", sql.NVarChar(30), status || "Ordered")
     .input("Results", sql.NVarChar(sql.MAX), results || null)
     .query(`
-      INSERT INTO OPDTestOrders (AppointmentID, PatientID, TestID, Status, Results)
-      OUTPUT INSERTED.*
-      VALUES (@AppointmentID, @PatientID, @TestID, @Status, @Results)
+      EXEC sp_AddOPDTestOrder
+        @AppointmentID = @AppointmentID,
+        @PatientID = @PatientID,
+        @TestID = @TestID,
+        @Status = @Status,
+        @Results = @Results
     `);
+
+  const testOrderId = created.recordset[0]?.TestOrderID;
+  const result = await pool
+    .request()
+    .input("TestOrderID", sql.Int, testOrderId)
+    .query("SELECT * FROM OPDTestOrders WHERE TestOrderID = @TestOrderID");
 
   res.status(201).json(result.recordset[0]);
 });

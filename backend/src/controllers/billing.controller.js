@@ -33,25 +33,54 @@ const getOPDPayment = asyncHandler(async (req, res) => {
 });
 
 const createOPDPayment = asyncHandler(async (req, res) => {
-  const { appointmentId, patientId, totalAmount, paidAmount, status } = req.body;
+  const { appointmentId, patientId, totalAmount, paidAmount, details } = req.body;
 
   if (!appointmentId || !patientId) {
     return res.status(400).json({ message: "Appointment and patient are required" });
   }
 
+  if (!Array.isArray(details) || details.length === 0 || details.length > 2) {
+    return res.status(400).json({ message: "Provide 1 or 2 billing detail items in details[]" });
+  }
+
+  const first = details[0];
+  const second = details[1] || null;
+  if (!first.itemType || first.amount === undefined) {
+    return res.status(400).json({ message: "Each detail requires itemType and amount" });
+  }
+
   const pool = await getPool();
-  const result = await pool
+  const created = await pool
     .request()
     .input("AppointmentID", sql.Int, appointmentId)
     .input("PatientID", sql.Int, patientId)
     .input("TotalAmount", sql.Decimal(10, 2), totalAmount || 0)
     .input("PaidAmount", sql.Decimal(10, 2), paidAmount || 0)
-    .input("Status", sql.NVarChar(30), status || "Pending")
+    .input("ItemType1", sql.NVarChar(80), first.itemType)
+    .input("Amount1", sql.Decimal(10, 2), first.amount)
+    .input("Quantity1", sql.Int, first.quantity || 1)
+    .input("ItemType2", sql.NVarChar(80), second?.itemType || null)
+    .input("Amount2", sql.Decimal(10, 2), second?.amount || null)
+    .input("Quantity2", sql.Int, second?.quantity || 1)
     .query(`
-      INSERT INTO OPDPayments (AppointmentID, PatientID, TotalAmount, PaidAmount, Status)
-      OUTPUT INSERTED.*
-      VALUES (@AppointmentID, @PatientID, @TotalAmount, @PaidAmount, @Status)
+      EXEC sp_CreateOPDPaymentWithDetails
+        @AppointmentID = @AppointmentID,
+        @PatientID = @PatientID,
+        @TotalAmount = @TotalAmount,
+        @PaidAmount = @PaidAmount,
+        @ItemType1 = @ItemType1,
+        @Amount1 = @Amount1,
+        @Quantity1 = @Quantity1,
+        @ItemType2 = @ItemType2,
+        @Amount2 = @Amount2,
+        @Quantity2 = @Quantity2
     `);
+
+  const paymentId = created.recordset[0]?.PaymentID;
+  const result = await pool
+    .request()
+    .input("PaymentID", sql.Int, paymentId)
+    .query("SELECT * FROM OPDPayments WHERE PaymentID = @PaymentID");
 
   res.status(201).json(result.recordset[0]);
 });

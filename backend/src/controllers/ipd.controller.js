@@ -39,43 +39,36 @@ const getAdmission = asyncHandler(async (req, res) => {
 });
 
 const createAdmission = asyncHandler(async (req, res) => {
-  const {
-    patientId,
-    attendingDoctorId,
-    bedId,
-    wardId,
-    admissionDate,
-    dischargeDate,
-    admissionType,
-    status,
-    clinicalDiagnosis
-  } = req.body;
+  const { patientId, attendingDoctorId, bedId, wardId, admissionType, clinicalDiagnosis } = req.body;
 
   if (!patientId || !attendingDoctorId || !bedId || !wardId || !admissionType) {
     return res.status(400).json({ message: "Patient, doctor, bed, ward, and admission type are required" });
   }
 
   const pool = await getPool();
-  const result = await pool
+  const created = await pool
     .request()
     .input("PatientID", sql.Int, patientId)
     .input("AttendingDoctorID", sql.Int, attendingDoctorId)
     .input("BedID", sql.Int, bedId)
     .input("WardID", sql.Int, wardId)
-    .input("AdmissionDate", sql.DateTime2, admissionDate || null)
-    .input("DischargeDate", sql.DateTime2, dischargeDate || null)
     .input("AdmissionType", sql.NVarChar(50), admissionType)
-    .input("Status", sql.NVarChar(30), status || "Admitted")
     .input("ClinicalDiagnosis", sql.NVarChar(sql.MAX), clinicalDiagnosis || null)
     .query(`
-      INSERT INTO IPDAdmissions
-        (PatientID, AttendingDoctorID, BedID, WardID, AdmissionDate, DischargeDate,
-         AdmissionType, Status, ClinicalDiagnosis)
-      OUTPUT INSERTED.*
-      VALUES
-        (@PatientID, @AttendingDoctorID, @BedID, @WardID, COALESCE(@AdmissionDate, SYSUTCDATETIME()),
-         @DischargeDate, @AdmissionType, @Status, @ClinicalDiagnosis)
+      EXEC sp_AdmitPatientTransactional
+        @PatientID = @PatientID,
+        @AttendingDoctorID = @AttendingDoctorID,
+        @BedID = @BedID,
+        @WardID = @WardID,
+        @AdmissionType = @AdmissionType,
+        @ClinicalDiagnosis = @ClinicalDiagnosis
     `);
+
+  const admissionId = created.recordset[0]?.AdmissionID;
+  const result = await pool
+    .request()
+    .input("AdmissionID", sql.Int, admissionId)
+    .query("SELECT * FROM IPDAdmissions WHERE AdmissionID = @AdmissionID");
 
   res.status(201).json(result.recordset[0]);
 });

@@ -20,7 +20,7 @@ CREATE TABLE Users (
     Address NVARCHAR(255) NULL,
     CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
     IsActive BIT NOT NULL DEFAULT 1,
-    CONSTRAINT CK_Users_Role CHECK (Role IN ('Admin', 'Patient', 'Doctor', 'Nurse'))
+    CONSTRAINT CK_Users_Role CHECK (Role IN ('Admin', 'Patient', 'Doctor', 'Nurse', 'Receptionist'))
 );
 
 CREATE TABLE Patients (
@@ -383,4 +383,359 @@ CREATE INDEX IX_OPDAppointments_Patient ON OPDAppointments(PatientID, Appointmen
 CREATE INDEX IX_IPDAdmissions_Status ON IPDAdmissions(Status, AdmissionDate);
 CREATE INDEX IX_OPDPayments_Status ON OPDPayments(Status);
 CREATE INDEX IX_IPDPayments_Status ON IPDPayments(Status);
+GO
+
+/*
+    ==========================
+    BONUS: VIEWS
+    ==========================
+    These views provide denormalized datasets for dashboards and reports.
+*/
+
+CREATE VIEW vw_PatientDirectory
+AS
+SELECT
+    p.PatientID,
+    p.MRNumber,
+    u.FullName AS PatientName,
+    u.Email,
+    u.Phone,
+    p.DateOfBirth,
+    p.Gender,
+    p.BloodGroup,
+    p.EmergencyContact
+FROM Patients p
+INNER JOIN Users u ON u.UserID = p.UserID;
+GO
+
+CREATE VIEW vw_OPDAppointmentDetails
+AS
+SELECT
+    a.AppointmentID,
+    a.AppointmentDate,
+    a.AppointmentType,
+    a.Status,
+    a.TokenNumber,
+    p.PatientID,
+    p.MRNumber,
+    pu.FullName AS PatientName,
+    d.DoctorID,
+    du.FullName AS DoctorName,
+    d.Specialization,
+    r.RoomNumber
+FROM OPDAppointments a
+INNER JOIN Patients p ON p.PatientID = a.PatientID
+INNER JOIN Users pu ON pu.UserID = p.UserID
+INNER JOIN Doctors d ON d.DoctorID = a.DoctorID
+INNER JOIN Users du ON du.UserID = d.UserID
+LEFT JOIN OPDRooms r ON r.RoomID = a.RoomID;
+GO
+
+CREATE VIEW vw_BillingSummary
+AS
+SELECT
+    'OPD' AS BillingType,
+    op.PaymentID,
+    op.PatientID,
+    op.TotalAmount,
+    op.PaidAmount,
+    (op.TotalAmount - op.PaidAmount) AS OutstandingAmount,
+    op.Status
+FROM OPDPayments op
+UNION ALL
+SELECT
+    'IPD' AS BillingType,
+    ip.PaymentID,
+    ip.PatientID,
+    ip.TotalAmount,
+    ip.PaidAmount,
+    (ip.TotalAmount - ip.PaidAmount) AS OutstandingAmount,
+    ip.Status
+FROM IPDPayments ip;
+GO
+
+/*
+    ==========================
+    BONUS: STORED PROCEDURES
+    ==========================
+    These procedures enforce reusable transactional operations.
+*/
+
+CREATE OR ALTER PROCEDURE sp_BookOPDAppointment
+    @PatientID INT,
+    @DoctorID INT,
+    @RoomID INT = NULL,
+    @AppointmentDate DATETIME2,
+    @AppointmentType NVARCHAR(50),
+    @ChiefComplaint NVARCHAR(MAX) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    INSERT INTO OPDAppointments
+        (PatientID, DoctorID, RoomID, AppointmentDate, AppointmentType, Status, ChiefComplaint, TokenNumber)
+    VALUES
+        (@PatientID, @DoctorID, @RoomID, @AppointmentDate, @AppointmentType, 'Pending', @ChiefComplaint, NEXT VALUE FOR OPDTokenSequence);
+
+    SELECT SCOPE_IDENTITY() AS AppointmentID;
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_RecordOPDPayment
+    @AppointmentID INT,
+    @PatientID INT,
+    @TotalAmount DECIMAL(10,2),
+    @PaidAmount DECIMAL(10,2)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Status NVARCHAR(30) =
+        CASE
+            WHEN @PaidAmount <= 0 THEN 'Pending'
+            WHEN @PaidAmount < @TotalAmount THEN 'Partial'
+            WHEN @PaidAmount >= @TotalAmount THEN 'Paid'
+            ELSE 'Pending'
+        END;
+
+    INSERT INTO OPDPayments (AppointmentID, PatientID, TotalAmount, PaidAmount, Status)
+    VALUES (@AppointmentID, @PatientID, @TotalAmount, @PaidAmount, @Status);
+
+    SELECT SCOPE_IDENTITY() AS PaymentID, @Status AS PaymentStatus;
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_GetDoctorRating
+    @DoctorID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT
+        r.DoctorID,
+        COUNT(*) AS TotalReviews,
+        CAST(AVG(CAST(r.Rating AS DECIMAL(10,2))) AS DECIMAL(10,2)) AS AverageRating
+    FROM Reviews r
+    WHERE r.DoctorID = @DoctorID
+    GROUP BY r.DoctorID;
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_AddOPDPrescription
+    @AppointmentID INT,
+    @PatientID INT,
+    @DoctorID INT,
+    @PrescriptionDate DATE = NULL,
+    @Diagnosis NVARCHAR(MAX) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    INSERT INTO OPDPrescriptions (AppointmentID, PatientID, DoctorID, PrescriptionDate, Diagnosis)
+    VALUES (@AppointmentID, @PatientID, @DoctorID, COALESCE(@PrescriptionDate, CONVERT(DATE, GETDATE())), @Diagnosis);
+
+    SELECT SCOPE_IDENTITY() AS PrescriptionID;
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_AddOPDTestOrder
+    @AppointmentID INT,
+    @PatientID INT,
+    @TestID INT,
+    @Status NVARCHAR(30) = 'Ordered',
+    @Results NVARCHAR(MAX) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    INSERT INTO OPDTestOrders (AppointmentID, PatientID, TestID, Status, Results)
+    VALUES (@AppointmentID, @PatientID, @TestID, @Status, @Results);
+
+    SELECT SCOPE_IDENTITY() AS TestOrderID;
+END;
+GO
+
+/*
+    Transactional procedure:
+    Creates OPD payment and corresponding billing details atomically.
+    If any detail insert fails, everything is rolled back.
+*/
+CREATE OR ALTER PROCEDURE sp_CreateOPDPaymentWithDetails
+    @AppointmentID INT,
+    @PatientID INT,
+    @TotalAmount DECIMAL(10,2),
+    @PaidAmount DECIMAL(10,2),
+    @ItemType1 NVARCHAR(80),
+    @Amount1 DECIMAL(10,2),
+    @Quantity1 INT = 1,
+    @ItemType2 NVARCHAR(80) = NULL,
+    @Amount2 DECIMAL(10,2) = NULL,
+    @Quantity2 INT = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        DECLARE @PaymentID INT;
+        DECLARE @Status NVARCHAR(30) =
+            CASE
+                WHEN @PaidAmount <= 0 THEN 'Pending'
+                WHEN @PaidAmount < @TotalAmount THEN 'Partial'
+                WHEN @PaidAmount >= @TotalAmount THEN 'Paid'
+                ELSE 'Pending'
+            END;
+
+        INSERT INTO OPDPayments (AppointmentID, PatientID, TotalAmount, PaidAmount, Status)
+        VALUES (@AppointmentID, @PatientID, @TotalAmount, @PaidAmount, @Status);
+
+        SET @PaymentID = SCOPE_IDENTITY();
+
+        INSERT INTO OPDBillingDetails (PaymentID, ItemType, Amount, Quantity)
+        VALUES (@PaymentID, @ItemType1, @Amount1, @Quantity1);
+
+        IF @ItemType2 IS NOT NULL AND @Amount2 IS NOT NULL
+        BEGIN
+            INSERT INTO OPDBillingDetails (PaymentID, ItemType, Amount, Quantity)
+            VALUES (@PaymentID, @ItemType2, @Amount2, @Quantity2);
+        END
+
+        COMMIT TRANSACTION;
+
+        SELECT @PaymentID AS PaymentID, @Status AS PaymentStatus;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+
+        THROW;
+    END CATCH
+END;
+GO
+
+/*
+    Transactional procedure:
+    Admits patient only when selected bed is available.
+    Uses update lock to prevent race conditions on bed assignment.
+*/
+CREATE OR ALTER PROCEDURE sp_AdmitPatientTransactional
+    @PatientID INT,
+    @AttendingDoctorID INT,
+    @BedID INT,
+    @WardID INT,
+    @AdmissionType NVARCHAR(50),
+    @ClinicalDiagnosis NVARCHAR(MAX) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        DECLARE @CurrentBedStatus NVARCHAR(30);
+
+        SELECT @CurrentBedStatus = b.Status
+        FROM Beds b WITH (UPDLOCK, HOLDLOCK)
+        WHERE b.BedID = @BedID;
+
+        IF @CurrentBedStatus IS NULL
+        BEGIN
+            RAISERROR('Bed does not exist.', 16, 1);
+        END
+
+        IF @CurrentBedStatus <> 'Available'
+        BEGIN
+            RAISERROR('Bed is not available for admission.', 16, 1);
+        END
+
+        INSERT INTO IPDAdmissions
+            (PatientID, AttendingDoctorID, BedID, WardID, AdmissionType, Status, ClinicalDiagnosis)
+        VALUES
+            (@PatientID, @AttendingDoctorID, @BedID, @WardID, @AdmissionType, 'Admitted', @ClinicalDiagnosis);
+
+        UPDATE Beds
+        SET Status = 'Occupied'
+        WHERE BedID = @BedID;
+
+        COMMIT TRANSACTION;
+
+        SELECT SCOPE_IDENTITY() AS AdmissionID;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+
+        THROW;
+    END CATCH
+END;
+GO
+
+/*
+    ==========================
+    BONUS: TRIGGERS
+    ==========================
+    These triggers keep cross-table integrity aligned with business rules.
+*/
+
+CREATE OR ALTER TRIGGER trg_OPDPayments_SetStatus
+ON OPDPayments
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    UPDATE p
+    SET p.Status =
+        CASE
+            WHEN p.PaidAmount <= 0 THEN 'Pending'
+            WHEN p.PaidAmount < p.TotalAmount THEN 'Partial'
+            WHEN p.PaidAmount >= p.TotalAmount THEN 'Paid'
+            ELSE p.Status
+        END
+    FROM OPDPayments p
+    INNER JOIN inserted i ON i.PaymentID = p.PaymentID;
+END;
+GO
+
+CREATE OR ALTER TRIGGER trg_IPDPayments_SetStatus
+ON IPDPayments
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    UPDATE p
+    SET p.Status =
+        CASE
+            WHEN p.PaidAmount <= 0 THEN 'Pending'
+            WHEN p.PaidAmount < p.TotalAmount THEN 'Partial'
+            WHEN p.PaidAmount >= p.TotalAmount THEN 'Paid'
+            ELSE p.Status
+        END
+    FROM IPDPayments p
+    INNER JOIN inserted i ON i.PaymentID = p.PaymentID;
+END;
+GO
+
+CREATE OR ALTER TRIGGER trg_IPDAdmissions_BedOccupancy
+ON IPDAdmissions
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Beds for active admissions remain occupied.
+    UPDATE b
+    SET b.Status = CASE WHEN i.Status = 'Admitted' THEN 'Occupied' ELSE b.Status END
+    FROM Beds b
+    INNER JOIN inserted i ON i.BedID = b.BedID;
+
+    -- Beds are released when admission leaves active state.
+    UPDATE b
+    SET b.Status = 'Available'
+    FROM Beds b
+    INNER JOIN inserted i ON i.BedID = b.BedID
+    WHERE i.Status IN ('Discharged', 'Cancelled', 'Transferred');
+END;
 GO
