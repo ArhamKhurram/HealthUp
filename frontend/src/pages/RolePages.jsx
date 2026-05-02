@@ -483,16 +483,19 @@ export function AddPrescription({ user }) {
 }
 
 export function PatientDashboard({ user }) {
+  const patientId = Number(user.patientId);
   const appointments = useApi("/opd/appointments");
   const payments = useApi("/billing/opd-payments");
   const prescriptions = useApi("/opd/prescriptions");
-  const myAppointments = appointments.data.filter((appointment) => appointment.PatientID === user.patientId);
-  const myPayments = payments.data.filter((payment) => payment.PatientID === user.patientId);
-  const myPrescriptions = prescriptions.data.filter((prescription) => prescription.PatientID === user.patientId);
+  const myAppointments = appointments.data.filter((appointment) => Number(appointment.PatientID) === patientId);
+  const myPayments = payments.data.filter((payment) => Number(payment.PatientID) === patientId);
+  const myPrescriptions = prescriptions.data.filter((prescription) => Number(prescription.PatientID) === patientId);
+  const hasError = appointments.error || payments.error || prescriptions.error;
 
   return (
     <>
       <PageHeader eyebrow="Patient" title="My HealthUp" icon={Users} />
+      {hasError && <p className="error">Some dashboard data could not be loaded. Please refresh in a moment.</p>}
       <StatGrid
         stats={[
           { label: "Appointments", value: myAppointments.length },
@@ -509,8 +512,28 @@ export function PatientDashboard({ user }) {
 }
 
 export function MyAppointments({ user }) {
+  const patientId = Number(user.patientId);
   const appointments = useApi("/opd/appointments");
-  const rows = appointments.data.filter((appointment) => appointment.PatientID === user.patientId);
+  const rows = appointments.data.filter((appointment) => Number(appointment.PatientID) === patientId);
+
+  if (appointments.loading) {
+    return (
+      <>
+        <PageHeader eyebrow="Patient" title="My Appointments" icon={CalendarDays} />
+        <article className="data-panel patient-panel-state"><p className="muted">Loading your appointments...</p></article>
+      </>
+    );
+  }
+
+  if (appointments.error) {
+    return (
+      <>
+        <PageHeader eyebrow="Patient" title="My Appointments" icon={CalendarDays} />
+        <article className="data-panel patient-panel-state"><p className="error">{appointments.error}</p></article>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeader eyebrow="Patient" title="My Appointments" icon={CalendarDays} />
@@ -541,7 +564,7 @@ export function PaymentsPage({ user }) {
   const appointments = useApi("/opd/appointments");
   const [form, setForm] = useState({ appointmentId: "", patientId: user.role === "Patient" ? user.patientId || "" : "", totalAmount: 0, paidAmount: 0, status: "Pending" });
   const [message, setMessage] = useState("");
-  const rows = user.role === "Patient" ? payments.data.filter((payment) => payment.PatientID === user.patientId) : payments.data;
+  const rows = user.role === "Patient" ? payments.data.filter((payment) => Number(payment.PatientID) === Number(user.patientId)) : payments.data;
   const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
 
   const submit = async (event) => {
@@ -1128,34 +1151,146 @@ export function OrderOpdTests({ user }) {
 }
 
 export function MyPrescriptions({ user }) {
+  const patientId = Number(user.patientId);
   const prescriptions = useApi("/opd/prescriptions");
-  const rows = prescriptions.data.filter((p) => p.PatientID === user.patientId);
+  const rows = prescriptions.data.filter((p) => Number(p.PatientID) === patientId);
+
+  if (prescriptions.loading) {
+    return (
+      <>
+        <PageHeader eyebrow="Patient" title="My Prescriptions" icon={ClipboardPlus} />
+        <article className="data-panel patient-panel-state"><p className="muted">Loading your prescriptions...</p></article>
+      </>
+    );
+  }
+
+  if (prescriptions.error) {
+    return (
+      <>
+        <PageHeader eyebrow="Patient" title="My Prescriptions" icon={ClipboardPlus} />
+        <article className="data-panel patient-panel-state"><p className="error">{prescriptions.error}</p></article>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeader eyebrow="Patient" title="My Prescriptions" icon={ClipboardPlus} />
-      <DataTable rows={rows} columns={[{ key: "PrescriptionID", label: "ID" }, { key: "DoctorName", label: "Doctor" }, { key: "Diagnosis", label: "Diagnosis" }, { key: "PrescriptionDate", label: "Date" }]} />
+      <article className="data-panel">
+        <header>
+          <div><ClipboardPlus size={20} /><h2>Prescription History</h2></div>
+          <span>{rows.length}</span>
+        </header>
+        <DataTable
+          rows={rows}
+          empty="No prescriptions yet. Prescriptions from your doctor will appear here after appointments."
+          columns={[
+            { key: "PrescriptionID", label: "ID" },
+            { key: "DoctorName", label: "Doctor" },
+            { key: "Diagnosis", label: "Diagnosis" },
+            { key: "MedicationName", label: "Medication" },
+            { key: "Dosage", label: "Dosage" },
+            { key: "Frequency", label: "Frequency" },
+            { key: "PrescriptionDate", label: "Date", render: (row) => row.PrescriptionDate ? new Date(row.PrescriptionDate).toLocaleDateString() : "-" }
+          ]}
+        />
+      </article>
     </>
   );
 }
 
 export function MyTestOrders({ user }) {
+  const patientId = Number(user.patientId);
   const orders = useApi("/tests/orders/opd");
-  const rows = orders.data.filter((o) => o.PatientID === user.patientId);
+  const rows = orders.data.filter((o) => Number(o.PatientID) === patientId);
+
+  if (orders.loading) {
+    return (
+      <>
+        <PageHeader eyebrow="Patient" title="My Test Orders" icon={FlaskConical} />
+        <article className="data-panel patient-panel-state"><p className="muted">Loading your test orders...</p></article>
+      </>
+    );
+  }
+
+  if (orders.error) {
+    return (
+      <>
+        <PageHeader eyebrow="Patient" title="My Test Orders" icon={FlaskConical} />
+        <article className="data-panel patient-panel-state"><p className="error">{orders.error}</p></article>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeader eyebrow="Patient" title="My Test Orders" icon={FlaskConical} />
-      <DataTable rows={rows} columns={[{ key: "TestOrderID", label: "ID" }, { key: "TestName", label: "Test" }, { key: "Status", label: "Status" }, { key: "Results", label: "Results" }]} />
+      <article className="data-panel">
+        <header>
+          <div><FlaskConical size={20} /><h2>Laboratory Requests</h2></div>
+          <span>{rows.length}</span>
+        </header>
+        <DataTable
+          rows={rows}
+          empty="No test orders yet. Lab orders from your doctor will appear here."
+          columns={[
+            { key: "TestOrderID", label: "ID" },
+            { key: "TestName", label: "Test" },
+            { key: "Status", label: "Status", render: (row) => <span className={`patient-status ${String(row.Status || "").toLowerCase()}`}>{row.Status || "Unknown"}</span> },
+            { key: "Results", label: "Results", render: (row) => row.Results || "Pending" },
+            { key: "OrderDate", label: "Ordered On", render: (row) => row.OrderDate ? new Date(row.OrderDate).toLocaleDateString() : "-" }
+          ]}
+        />
+      </article>
     </>
   );
 }
 
 export function MyAdmissions({ user }) {
+  const patientId = Number(user.patientId);
   const admissions = useApi("/ipd/admissions");
-  const rows = admissions.data.filter((a) => a.PatientID === user.patientId);
+  const rows = admissions.data.filter((a) => Number(a.PatientID) === patientId);
+
+  if (admissions.loading) {
+    return (
+      <>
+        <PageHeader eyebrow="Patient" title="My Admissions" icon={BedDouble} />
+        <article className="data-panel patient-panel-state"><p className="muted">Loading your admissions...</p></article>
+      </>
+    );
+  }
+
+  if (admissions.error) {
+    return (
+      <>
+        <PageHeader eyebrow="Patient" title="My Admissions" icon={BedDouble} />
+        <article className="data-panel patient-panel-state"><p className="error">{admissions.error}</p></article>
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeader eyebrow="Patient" title="My Admissions" icon={BedDouble} />
-      <DataTable rows={rows} columns={[{ key: "AdmissionID", label: "ID" }, { key: "WardName", label: "Ward" }, { key: "BedNumber", label: "Bed" }, { key: "Status", label: "Status" }]} />
+      <article className="data-panel">
+        <header>
+          <div><BedDouble size={20} /><h2>Admission History</h2></div>
+          <span>{rows.length}</span>
+        </header>
+        <DataTable
+          rows={rows}
+          empty="No admissions found for your account."
+          columns={[
+            { key: "AdmissionID", label: "ID" },
+            { key: "AdmissionType", label: "Type" },
+            { key: "WardName", label: "Ward" },
+            { key: "BedNumber", label: "Bed" },
+            { key: "AttendingDoctorName", label: "Doctor" },
+            { key: "Status", label: "Status", render: (row) => <span className={`patient-status ${String(row.Status || "").toLowerCase()}`}>{row.Status || "Unknown"}</span> },
+            { key: "AdmissionDate", label: "Admitted On", render: (row) => row.AdmissionDate ? new Date(row.AdmissionDate).toLocaleDateString() : "-" }
+          ]}
+        />
+      </article>
     </>
   );
 }
