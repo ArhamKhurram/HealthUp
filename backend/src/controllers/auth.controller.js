@@ -3,6 +3,8 @@ const jwt = require("jsonwebtoken");
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 function shapeAuthUser(user) {
   return {
     userId: user.UserID,
@@ -17,11 +19,78 @@ function shapeAuthUser(user) {
   };
 }
 
+function normalizeOptional(value) {
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim();
+  return trimmed ? trimmed : null;
+}
+
+function validatePatientRegistration(payload) {
+  const errors = [];
+  const fullName = normalizeOptional(payload.fullName);
+  const email = normalizeOptional(payload.email)?.toLowerCase() || null;
+  const password = typeof payload.password === "string" ? payload.password : "";
+  const gender = normalizeOptional(payload.gender);
+  const dateOfBirthRaw = normalizeOptional(payload.dateOfBirth);
+  let dateOfBirth = null;
+
+  if (!fullName) errors.push({ field: "fullName", message: "Full name is required" });
+  if (!email) {
+    errors.push({ field: "email", message: "Email is required" });
+  } else if (!EMAIL_REGEX.test(email)) {
+    errors.push({ field: "email", message: "Enter a valid email address" });
+  }
+
+  if (!password) {
+    errors.push({ field: "password", message: "Password is required" });
+  } else if (password.length < 8) {
+    errors.push({ field: "password", message: "Password must be at least 8 characters" });
+  }
+
+  if (!dateOfBirthRaw) {
+    errors.push({ field: "dateOfBirth", message: "Date of birth is required" });
+  } else {
+    const parsed = new Date(dateOfBirthRaw);
+    const isDateValid = !Number.isNaN(parsed.getTime());
+    const now = new Date();
+    if (!isDateValid) {
+      errors.push({ field: "dateOfBirth", message: "Date of birth must be a valid date" });
+    } else if (parsed > now) {
+      errors.push({ field: "dateOfBirth", message: "Date of birth cannot be in the future" });
+    } else {
+      dateOfBirth = dateOfBirthRaw;
+    }
+  }
+
+  if (!gender) errors.push({ field: "gender", message: "Gender is required" });
+
+  return {
+    errors,
+    sanitized: {
+      fullName,
+      email,
+      password,
+      phone: normalizeOptional(payload.phone),
+      address: normalizeOptional(payload.address),
+      mrNumber: normalizeOptional(payload.mrNumber),
+      dateOfBirth,
+      gender,
+      bloodGroup: normalizeOptional(payload.bloodGroup),
+      emergencyContact: normalizeOptional(payload.emergencyContact),
+      allergies: normalizeOptional(payload.allergies),
+      chronicConditions: normalizeOptional(payload.chronicConditions)
+    }
+  };
+}
+
 const login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
-    return res.status(400).json({ message: "Email and password are required" });
+    return res.status(400).json({
+      code: "AUTH_VALIDATION_FAILED",
+      message: "Email and password are required"
+    });
   }
 
   const pool = await getPool();
@@ -41,13 +110,19 @@ const login = asyncHandler(async (req, res) => {
   const user = result.recordset[0];
 
   if (!user || !user.IsActive) {
-    return res.status(401).json({ message: "Invalid credentials" });
+    return res.status(401).json({
+      code: "AUTH_INVALID_CREDENTIALS",
+      message: "Invalid credentials"
+    });
   }
 
   const passwordMatches = await bcrypt.compare(password, user.Password);
 
   if (!passwordMatches) {
-    return res.status(401).json({ message: "Invalid credentials" });
+    return res.status(401).json({
+      code: "AUTH_INVALID_CREDENTIALS",
+      message: "Invalid credentials"
+    });
   }
 
   const token = jwt.sign(
@@ -63,28 +138,17 @@ const login = asyncHandler(async (req, res) => {
 });
 
 const registerPatient = asyncHandler(async (req, res) => {
-  const {
-    fullName,
-    email,
-    password,
-    phone,
-    address,
-    mrNumber,
-    dateOfBirth,
-    gender,
-    bloodGroup,
-    emergencyContact,
-    allergies,
-    chronicConditions
-  } = req.body;
+  const { errors, sanitized } = validatePatientRegistration(req.body || {});
 
-  if (!fullName || !email || !password || !dateOfBirth || !gender) {
+  if (errors.length) {
     return res.status(400).json({
-      message: "Full name, email, password, date of birth, and gender are required"
+      code: "AUTH_VALIDATION_FAILED",
+      message: "Patient registration validation failed",
+      errors
     });
   }
 
-  const hash = await bcrypt.hash(password, 10);
+  const hash = await bcrypt.hash(sanitized.password, 10);
   const pool = await getPool();
   const transaction = new sql.Transaction(pool);
 
@@ -92,11 +156,11 @@ const registerPatient = asyncHandler(async (req, res) => {
 
   try {
     const userResult = await new sql.Request(transaction)
-      .input("FullName", sql.NVarChar(120), fullName)
-      .input("Email", sql.NVarChar(150), email)
+      .input("FullName", sql.NVarChar(120), sanitized.fullName)
+      .input("Email", sql.NVarChar(150), sanitized.email)
       .input("Password", sql.NVarChar(255), hash)
-      .input("Phone", sql.NVarChar(30), phone || null)
-      .input("Address", sql.NVarChar(255), address || null)
+      .input("Phone", sql.NVarChar(30), sanitized.phone)
+      .input("Address", sql.NVarChar(255), sanitized.address)
       .query(`
         INSERT INTO Users (FullName, Email, Password, Role, Phone, Address)
         OUTPUT INSERTED.UserID, INSERTED.FullName, INSERTED.Email, INSERTED.Role
@@ -104,17 +168,17 @@ const registerPatient = asyncHandler(async (req, res) => {
       `);
 
     const user = userResult.recordset[0];
-    const generatedMrNumber = mrNumber || `MR-${String(user.UserID).padStart(4, "0")}`;
+    const generatedMrNumber = sanitized.mrNumber || `MR-${String(user.UserID).padStart(4, "0")}`;
 
     const patientResult = await new sql.Request(transaction)
       .input("UserID", sql.Int, user.UserID)
       .input("MRNumber", sql.NVarChar(50), generatedMrNumber)
-      .input("DateOfBirth", sql.Date, dateOfBirth)
-      .input("Gender", sql.NVarChar(20), gender)
-      .input("BloodGroup", sql.NVarChar(10), bloodGroup || null)
-      .input("EmergencyContact", sql.NVarChar(50), emergencyContact || null)
-      .input("Allergies", sql.NVarChar(sql.MAX), allergies || null)
-      .input("ChronicConditions", sql.NVarChar(sql.MAX), chronicConditions || null)
+      .input("DateOfBirth", sql.Date, sanitized.dateOfBirth)
+      .input("Gender", sql.NVarChar(20), sanitized.gender)
+      .input("BloodGroup", sql.NVarChar(10), sanitized.bloodGroup)
+      .input("EmergencyContact", sql.NVarChar(50), sanitized.emergencyContact)
+      .input("Allergies", sql.NVarChar(sql.MAX), sanitized.allergies)
+      .input("ChronicConditions", sql.NVarChar(sql.MAX), sanitized.chronicConditions)
       .query(`
         INSERT INTO Patients
           (UserID, MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions)
@@ -144,6 +208,14 @@ const registerPatient = asyncHandler(async (req, res) => {
     });
   } catch (error) {
     await transaction.rollback();
+    if (error?.number === 2627 || error?.number === 2601) {
+      const duplicateTarget = /MRNumber/i.test(error.originalError?.info?.message || error.message) ? "mrNumber" : "email";
+      return res.status(409).json({
+        code: "AUTH_CONFLICT",
+        message: duplicateTarget === "mrNumber" ? "MR number already exists" : "Email is already registered",
+        errors: [{ field: duplicateTarget, message: duplicateTarget === "mrNumber" ? "MR number must be unique" : "Email must be unique" }]
+      });
+    }
     throw error;
   }
 });
@@ -162,6 +234,13 @@ const me = asyncHandler(async (req, res) => {
       LEFT JOIN Nurses n ON n.UserID = u.UserID
       WHERE u.UserID = @UserID
     `);
+
+  if (!result.recordset[0]) {
+    return res.status(404).json({
+      code: "AUTH_USER_NOT_FOUND",
+      message: "Authenticated user record not found"
+    });
+  }
 
   res.json(shapeAuthUser(result.recordset[0]));
 });
