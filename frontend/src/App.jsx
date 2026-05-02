@@ -55,6 +55,14 @@ function App() {
       .map(([key, route]) => ({ key, ...route }));
   }, [user]);
 
+  useEffect(() => {
+    if (!user || !activePage) return;
+    const stillAllowed = allowedPages.some((route) => route.key === activePage);
+    if (!stillAllowed) {
+      setActivePage("");
+    }
+  }, [activePage, allowedPages, user]);
+
   if (!user) {
     return <LoginPage />;
   }
@@ -65,14 +73,6 @@ function App() {
   const currentRouteKey = roleRoutes[requestedRouteKey] ? requestedRouteKey : roleFallbackRouteKey;
   const currentRoute = roleRoutes[currentRouteKey];
   const canView = currentRoute?.roles.includes(user.role);
-
-  useEffect(() => {
-    if (!activePage) return;
-    const stillAllowed = allowedPages.some((route) => route.key === activePage);
-    if (!stillAllowed) {
-      setActivePage("");
-    }
-  }, [activePage, allowedPages]);
 
   const renderPage = () => {
     if (!currentRoute) {
