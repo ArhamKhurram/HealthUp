@@ -3,7 +3,9 @@ import { HeartPulse, LogIn, UserPlus } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 
 function LoginPage() {
-  const { login, registerPatient } = useAuth();
+  const auth = useAuth() || {};
+  const login = auth.login || (async () => {});
+  const registerPatient = auth.registerPatient || (async () => {});
   const [mode, setMode] = useState("signin");
   const [form, setForm] = useState({
     fullName: "",
@@ -19,6 +21,7 @@ function LoginPage() {
     chronicConditions: ""
   });
   const [error, setError] = useState("");
+  const [hint, setHint] = useState("");
   const [loading, setLoading] = useState(false);
 
   const updateField = (field, value) => {
@@ -35,6 +38,7 @@ function LoginPage() {
         await login(form.email, form.password);
       } else {
         await registerPatient(form);
+        setHint("Patient account created. You are now signed in.");
       }
     } catch (err) {
       setError(err.response?.data?.message || "Request failed");
@@ -55,15 +59,39 @@ function LoginPage() {
         </div>
 
         <div className="auth-tabs" aria-label="Authentication mode">
-          <button type="button" className={mode === "signin" ? "active" : ""} onClick={() => setMode("signin")}>
+          <button type="button" className={mode === "signin" ? "active" : ""} onClick={() => {
+            setMode("signin");
+            setError("");
+            setHint("");
+          }}>
             <LogIn size={16} />
             Sign in
           </button>
-          <button type="button" className={mode === "signup" ? "active" : ""} onClick={() => setMode("signup")}>
+          <button type="button" className={mode === "signup" ? "active" : ""} onClick={() => {
+            setMode("signup");
+            setError("");
+            setHint("New patient? Fill in the sign-up form to create your account.");
+          }}>
             <UserPlus size={16} />
             Patient sign up
           </button>
         </div>
+        <p className="auth-help">
+          {mode === "signin" ? "New patient account needed?" : "Already registered?"}
+          {" "}
+          <button
+            className="auth-link-button"
+            type="button"
+            onClick={() => {
+              const nextMode = mode === "signin" ? "signup" : "signin";
+              setMode(nextMode);
+              setError("");
+              setHint(nextMode === "signup" ? "New patient? Fill in the sign-up form to create your account." : "");
+            }}
+          >
+            {mode === "signin" ? "Sign up here" : "Sign in instead"}
+          </button>
+        </p>
 
         <form onSubmit={submit}>
           {mode === "signup" && (
@@ -158,6 +186,7 @@ function LoginPage() {
             </>
           )}
           {error && <p className="error">{error}</p>}
+          {hint && <p className="success">{hint}</p>}
           <button type="submit" disabled={loading}>
             {mode === "signin" ? <LogIn size={18} /> : <UserPlus size={18} />}
             {loading ? "Working..." : mode === "signin" ? "Sign in" : "Create patient account"}

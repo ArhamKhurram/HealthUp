@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { HeartPulse, LogOut, ShieldAlert } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
 import { roleDefaultRouteKey, roleRoutes } from "./config/routes";
@@ -43,7 +43,9 @@ import {
 } from "./pages/RolePages";
 
 function App() {
-  const { user, logout } = useAuth();
+  const auth = useAuth() || {};
+  const user = auth.user || null;
+  const logout = auth.logout || (() => {});
   const [activePage, setActivePage] = useState("");
 
   const allowedPages = useMemo(() => {
@@ -57,9 +59,20 @@ function App() {
     return <LoginPage />;
   }
 
-  const currentRouteKey = activePage || roleDefaultRouteKey[user.role] || "profile";
+  const defaultRouteKey = roleDefaultRouteKey[user.role];
+  const roleFallbackRouteKey = allowedPages[0]?.key || "profile";
+  const requestedRouteKey = activePage || defaultRouteKey || roleFallbackRouteKey;
+  const currentRouteKey = roleRoutes[requestedRouteKey] ? requestedRouteKey : roleFallbackRouteKey;
   const currentRoute = roleRoutes[currentRouteKey];
   const canView = currentRoute?.roles.includes(user.role);
+
+  useEffect(() => {
+    if (!activePage) return;
+    const stillAllowed = allowedPages.some((route) => route.key === activePage);
+    if (!stillAllowed) {
+      setActivePage("");
+    }
+  }, [activePage, allowedPages]);
 
   const renderPage = () => {
     if (!currentRoute) {
@@ -160,7 +173,7 @@ function App() {
         </div>
         <nav>
           {allowedPages.map((item) => {
-            const Icon = item.icon;
+            const Icon = item.icon || HeartPulse;
             return (
               <button
                 className={currentRouteKey === item.key ? "active" : ""}

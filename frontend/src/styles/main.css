@@ -88,6 +88,22 @@ form {
   color: #ffffff;
 }
 
+.auth-help {
+  margin: 12px 0 0;
+  color: #536564;
+  font-size: 14px;
+}
+
+.auth-link-button {
+  border: 0;
+  background: transparent;
+  color: #0f766e;
+  font-weight: 700;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
