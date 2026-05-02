@@ -397,6 +397,20 @@ main {
   margin: 0;
 }
 
+.compact-list {
+  margin-bottom: 16px;
+}
+
+.compact-list div {
+  grid-template-columns: 140px 1fr;
+}
+
+.panel-subtitle {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: #536564;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
