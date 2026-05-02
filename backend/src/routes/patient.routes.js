@@ -9,9 +9,9 @@ const {
 const { requireAuth, requireRole } = require("../middleware/auth");
 
 router.use(requireAuth);
-router.get("/", requireRole("Admin", "Doctor", "Nurse"), listPatients);
+router.get("/", requireRole("Admin", "Doctor", "Nurse", "Receptionist"), listPatients);
 router.get("/:id", requireRole("Admin", "Doctor", "Nurse", "Patient"), getPatient);
-router.post("/", requireRole("Admin"), createPatient);
+router.post("/", requireRole("Admin", "Receptionist"), createPatient);
 router.put("/:id", requireRole("Admin"), updatePatient);
 router.delete("/:id", requireRole("Admin"), deletePatient);
 
