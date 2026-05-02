@@ -574,7 +574,14 @@ export function PaymentsPage({ user }) {
       patientId: Number(form.patientId),
       totalAmount: Number(form.totalAmount),
       paidAmount: Number(form.paidAmount),
-      status: form.status
+      status: form.status,
+      details: [
+        {
+          itemType: "Consultation",
+          amount: Number(form.totalAmount || 0),
+          quantity: 1
+        }
+      ]
     });
     setMessage("Payment recorded.");
     payments.reload();
