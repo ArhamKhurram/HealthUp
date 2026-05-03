@@ -33,7 +33,9 @@ CREATE TABLE Patients (
     EmergencyContact NVARCHAR(50) NULL,
     Allergies NVARCHAR(MAX) NULL,
     ChronicConditions NVARCHAR(MAX) NULL,
-    CONSTRAINT FK_Patients_Users FOREIGN KEY (UserID) REFERENCES Users(UserID)
+    CONSTRAINT FK_Patients_Users FOREIGN KEY (UserID) REFERENCES Users(UserID),
+    CONSTRAINT CK_Patients_Gender CHECK (Gender IN ('M', 'F', 'Other')),
+    CONSTRAINT CK_Patients_BloodGroup CHECK (BloodGroup IN ('O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', NULL))
 );
 
 CREATE TABLE Doctors (
@@ -938,6 +940,24 @@ BEGIN
 END;
 GO
 
+CREATE TABLE DoctorSchedules (
+    ScheduleID INT IDENTITY(1,1) PRIMARY KEY,
+    DoctorID INT NOT NULL FOREIGN KEY REFERENCES Doctors(DoctorID),
+    DayOfWeek INT NOT NULL, -- 0=Sunday, 1=Monday, ..., 6=Saturday
+    StartTime TIME NOT NULL,
+    EndTime TIME NOT NULL,
+    SlotDurationMinutes INT DEFAULT 30,
+    IsActive BIT DEFAULT 1,
+    CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    UpdatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    UpdatedBy INT FOREIGN KEY REFERENCES Users(UserID)
+);
+GO
+
+CREATE INDEX IX_DoctorSchedules_Doctor ON DoctorSchedules(DoctorID);
+CREATE INDEX IX_DoctorSchedules_Day ON DoctorSchedules(DayOfWeek);
+GO
+
 CREATE OR ALTER TRIGGER trg_Nurses_UserRole
 ON Nurses
 AFTER INSERT, UPDATE
@@ -953,5 +973,5 @@ BEGIN
         RAISERROR('Nurses.UserID must reference a user with Role = Nurse.', 16, 1);
         ROLLBACK TRANSACTION;
     END
-END;
+END
 GO

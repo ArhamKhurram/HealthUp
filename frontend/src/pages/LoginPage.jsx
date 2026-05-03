@@ -11,6 +11,7 @@ function LoginPage() {
     fullName: "",
     email: "",
     password: "",
+    passwordConfirm: "",
     phone: "",
     address: "",
     dateOfBirth: "",
@@ -21,8 +22,11 @@ function LoginPage() {
     chronicConditions: ""
   });
   const [error, setError] = useState("");
+  const [errors, setErrors] = useState([]);
   const [hint, setHint] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   const updateField = (field, value) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -31,17 +35,52 @@ function LoginPage() {
   const submit = async (event) => {
     event.preventDefault();
     setError("");
+    setErrors([]);
     setLoading(true);
 
     try {
       if (mode === "signin") {
         await login(form.email, form.password);
       } else {
-        await registerPatient(form);
+        const payload = {
+          fullName: form.fullName,
+          email: form.email,
+          password: form.password,
+          passwordConfirm: form.passwordConfirm,
+          phone: form.phone,
+          address: form.address,
+          dateOfBirth: form.dateOfBirth,
+          gender: form.gender,
+          bloodGroup: form.bloodGroup,
+          emergencyContact: form.emergencyContact,
+          allergies: form.allergies,
+          chronicConditions: form.chronicConditions
+        };
+        await registerPatient(payload);
         setHint("Patient account created. You are now signed in.");
-      }
+        setForm({
+          fullName: "",
+          email: "",
+          password: "",
+          passwordConfirm: "",
+          phone: "",
+          address: "",
+          dateOfBirth: "",
+          gender: "",
+          bloodGroup: "",
+          emergencyContact: "",
+          allergies: "",
+          chronicConditions: ""
+        });
+      };
     } catch (err) {
-      setError(err.response?.data?.message || "Request failed");
+      const errData = err.response?.data;
+      if (errData?.errors) {
+        setErrors(errData.errors);
+        setError(errData.message || "Validation failed");
+      } else {
+        setError(err.response?.data?.message || "Request failed");
+      }
     } finally {
       setLoading(false);
     }
@@ -116,13 +155,66 @@ function LoginPage() {
           </label>
           <label>
             Password
-            <input
-              type="password"
-              value={form.password}
-              onChange={(event) => updateField("password", event.target.value)}
-              required
-            />
+            <div style={{ position: "relative" }}>
+              <input
+                type={showPassword ? "text" : "password"}
+                value={form.password}
+                onChange={(event) => updateField("password", event.target.value)}
+                required
+              />
+              <button
+                type="button"
+                style={{
+                  position: "absolute",
+                  right: "10px",
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  color: "#687a7a",
+                  fontWeight: "normal",
+                  padding: "4px 8px",
+                  fontSize: "13px",
+                }}
+                onClick={() => setShowPassword(!showPassword)}
+              >
+                {showPassword ? "Hide" : "Show"}
+              </button>
+            </div>
           </label>
+          {mode === "signup" && (
+            <label>
+              Confirm password
+              <div style={{ position: "relative" }}>
+                <input
+                  type={showConfirmPassword ? "text" : "password"}
+                  value={form.passwordConfirm}
+                  onChange={(event) => updateField("passwordConfirm", event.target.value)}
+                  required
+                />
+                <button
+                  type="button"
+                  style={{
+                    position: "absolute",
+                    right: "10px",
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    color: "#687a7a",
+                    fontWeight: "normal",
+                    padding: "4px 8px",
+                    fontSize: "13px",
+                  }}
+                  onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                >
+                  {showConfirmPassword ? "Hide" : "Show"}
+                </button>
+              </div>
+            </label>
+          )}
           {mode === "signup" && (
             <>
               <div className="form-grid">
@@ -137,26 +229,44 @@ function LoginPage() {
                 </label>
                 <label>
                   Gender
-                  <input
-                    type="text"
+                  <select
                     value={form.gender}
                     onChange={(event) => updateField("gender", event.target.value)}
                     required
-                  />
+                  >
+                    <option value="">Select gender</option>
+                    <option value="M">Male</option>
+                    <option value="F">Female</option>
+                    <option value="Other">Other</option>
+                  </select>
                 </label>
               </div>
               <div className="form-grid">
                 <label>
                   Phone
-                  <input type="tel" value={form.phone} onChange={(event) => updateField("phone", event.target.value)} />
+                  <input
+                    type="tel"
+                    placeholder="e.g., 03001234567"
+                    value={form.phone}
+                    onChange={(event) => updateField("phone", event.target.value)}
+                  />
                 </label>
                 <label>
                   Blood group
-                  <input
-                    type="text"
+                  <select
                     value={form.bloodGroup}
                     onChange={(event) => updateField("bloodGroup", event.target.value)}
-                  />
+                  >
+                    <option value="">Select blood group</option>
+                    <option value="O+">O+</option>
+                    <option value="O-">O-</option>
+                    <option value="A+">A+</option>
+                    <option value="A-">A-</option>
+                    <option value="B+">B+</option>
+                    <option value="B-">B-</option>
+                    <option value="AB+">AB+</option>
+                    <option value="AB-">AB-</option>
+                  </select>
                 </label>
               </div>
               <label>
@@ -185,7 +295,18 @@ function LoginPage() {
               </label>
             </>
           )}
-          {error && <p className="error">{error}</p>}
+          {(error || (errors && errors.length > 0)) && (
+            <div>
+              {error && <p className="error">{error}</p>}
+              {errors && errors.length > 0 && (
+                <ul className="error" style={{ textAlign: "left", margin: "8px 0", paddingLeft: "20px" }}>
+                  {errors.map((e, i) => (
+                    <li key={i}>{e.field ? `${e.field}: ${e.message}` : e.message}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           {hint && <p className="success">{hint}</p>}
           <button type="submit" disabled={loading}>
             {mode === "signin" ? <LogIn size={18} /> : <UserPlus size={18} />}
