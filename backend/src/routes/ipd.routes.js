@@ -19,8 +19,8 @@ const {
 const { requireAuth, requireRole } = require("../middleware/auth");
 
 router.use(requireAuth);
-router.get("/admissions", requireRole("Admin", "Doctor", "Nurse", "Receptionist"), listAdmissions);
-router.get("/admissions/:id", requireRole("Admin", "Doctor", "Nurse", "Receptionist"), getAdmission);
+router.get("/admissions", requireRole("Admin", "Doctor", "Nurse", "Receptionist", "Patient"), listAdmissions);
+router.get("/admissions/:id", requireRole("Admin", "Doctor", "Nurse", "Receptionist", "Patient"), getAdmission);
 router.post("/admissions", requireRole("Admin", "Doctor", "Nurse", "Receptionist"), createAdmission);
 router.put("/admissions/:id", requireRole("Admin", "Doctor", "Nurse", "Receptionist"), updateAdmission);
 router.delete("/admissions/:id", requireRole("Admin"), deleteAdmission);

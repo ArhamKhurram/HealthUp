@@ -1,9 +1,35 @@
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
 
+const getActorContext = async (pool, userId) => {
+  const result = await pool
+    .request()
+    .input("UserID", sql.Int, userId)
+    .query(`
+      SELECT
+        (SELECT TOP 1 PatientID FROM Patients WHERE UserID = @UserID) AS PatientID,
+        (SELECT TOP 1 DoctorID FROM Doctors WHERE UserID = @UserID) AS DoctorID
+    `);
+  return result.recordset[0] || { PatientID: null, DoctorID: null };
+};
+
 const listAppointments = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool.request().query(`
+  const request = pool.request();
+  let whereClause = "";
+  if (req.user.role === "Patient") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
+    request.input("ActorPatientID", sql.Int, actor.PatientID);
+    whereClause = "WHERE a.PatientID = @ActorPatientID";
+  } else if (req.user.role === "Doctor") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
+    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
+    whereClause = "WHERE a.DoctorID = @ActorDoctorID";
+  }
+
+  const result = await request.query(`
     SELECT a.AppointmentID, a.PatientID, a.DoctorID, a.RoomID,
            a.AppointmentDate, a.AppointmentType, a.Status,
            a.ChiefComplaint, a.TokenNumber, p.MRNumber,
@@ -15,6 +41,7 @@ const listAppointments = asyncHandler(async (req, res) => {
     INNER JOIN Doctors d ON d.DoctorID = a.DoctorID
     INNER JOIN Users doctorUser ON doctorUser.UserID = d.UserID
     LEFT JOIN OPDRooms r ON r.RoomID = a.RoomID
+    ${whereClause}
     ORDER BY a.AppointmentDate DESC
   `);
   res.json(result.recordset);
@@ -22,15 +49,29 @@ const listAppointments = asyncHandler(async (req, res) => {
 
 const createAppointment = asyncHandler(async (req, res) => {
   const { patientId, doctorId, roomId, appointmentDate, appointmentType, chiefComplaint } = req.body;
+  let effectivePatientId = patientId;
 
-  if (!patientId || !doctorId || !appointmentDate || !appointmentType) {
+  if (!doctorId || !appointmentDate || !appointmentType) {
     return res.status(400).json({ message: "Patient, doctor, appointment date, and appointment type are required" });
   }
 
   const pool = await getPool();
+  if (req.user.role === "Patient") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
+    if (patientId && Number(patientId) !== Number(actor.PatientID)) {
+      return res.status(403).json({ message: "Patients can only create their own appointments" });
+    }
+    effectivePatientId = actor.PatientID;
+  }
+
+  if (!effectivePatientId) {
+    return res.status(400).json({ message: "Patient is required" });
+  }
+
   const created = await pool
     .request()
-    .input("PatientID", sql.Int, patientId)
+    .input("PatientID", sql.Int, effectivePatientId)
     .input("DoctorID", sql.Int, doctorId)
     .input("RoomID", sql.Int, roomId || null)
     .input("AppointmentDate", sql.DateTime2, appointmentDate)
@@ -57,13 +98,24 @@ const createAppointment = asyncHandler(async (req, res) => {
 
 const getAppointment = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
-    .input("AppointmentID", sql.Int, req.params.id)
-    .query(`
+  const request = pool.request().input("AppointmentID", sql.Int, req.params.id);
+  let whereClause = "WHERE AppointmentID = @AppointmentID";
+  if (req.user.role === "Patient") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
+    request.input("ActorPatientID", sql.Int, actor.PatientID);
+    whereClause += " AND PatientID = @ActorPatientID";
+  } else if (req.user.role === "Doctor") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
+    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
+    whereClause += " AND DoctorID = @ActorDoctorID";
+  }
+
+  const result = await request.query(`
       SELECT *
       FROM OPDAppointments
-      WHERE AppointmentID = @AppointmentID
+      ${whereClause}
     `);
 
   if (!result.recordset[0]) {
@@ -131,7 +183,21 @@ const deleteAppointment = asyncHandler(async (req, res) => {
 
 const listPrescriptions = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool.request().query(`
+  const request = pool.request();
+  let whereClause = "";
+  if (req.user.role === "Patient") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
+    request.input("ActorPatientID", sql.Int, actor.PatientID);
+    whereClause = "WHERE pr.PatientID = @ActorPatientID";
+  } else if (req.user.role === "Doctor") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
+    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
+    whereClause = "WHERE pr.DoctorID = @ActorDoctorID";
+  }
+
+  const result = await request.query(`
     SELECT pr.PrescriptionID, pr.AppointmentID, pr.PatientID, pr.DoctorID,
            pr.PrescriptionDate, pr.Diagnosis,
            patientUser.FullName AS PatientName, doctorUser.FullName AS DoctorName
@@ -140,6 +206,7 @@ const listPrescriptions = asyncHandler(async (req, res) => {
     INNER JOIN Users patientUser ON patientUser.UserID = p.UserID
     INNER JOIN Doctors d ON d.DoctorID = pr.DoctorID
     INNER JOIN Users doctorUser ON doctorUser.UserID = d.UserID
+    ${whereClause}
     ORDER BY pr.PrescriptionID DESC
   `);
 
@@ -148,13 +215,24 @@ const listPrescriptions = asyncHandler(async (req, res) => {
 
 const getPrescription = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
-    .input("PrescriptionID", sql.Int, req.params.id)
-    .query(`
+  const request = pool.request().input("PrescriptionID", sql.Int, req.params.id);
+  let whereClause = "WHERE PrescriptionID = @PrescriptionID";
+  if (req.user.role === "Patient") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
+    request.input("ActorPatientID", sql.Int, actor.PatientID);
+    whereClause += " AND PatientID = @ActorPatientID";
+  } else if (req.user.role === "Doctor") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
+    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
+    whereClause += " AND DoctorID = @ActorDoctorID";
+  }
+
+  const result = await request.query(`
       SELECT *
       FROM OPDPrescriptions
-      WHERE PrescriptionID = @PrescriptionID
+      ${whereClause}
     `);
 
   if (!result.recordset[0]) {
@@ -166,17 +244,36 @@ const getPrescription = asyncHandler(async (req, res) => {
 
 const createPrescription = asyncHandler(async (req, res) => {
   const { appointmentId, patientId, doctorId, prescriptionDate, diagnosis } = req.body;
+  let effectiveDoctorId = doctorId;
 
   if (!appointmentId || !patientId || !doctorId) {
     return res.status(400).json({ message: "Appointment, patient, and doctor are required" });
   }
 
   const pool = await getPool();
+  const appointmentCheck = await pool
+    .request()
+    .input("AppointmentID", sql.Int, appointmentId)
+    .query("SELECT AppointmentID, PatientID, DoctorID FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
+  const appointment = appointmentCheck.recordset[0];
+  if (!appointment) return res.status(404).json({ message: "Appointment not found" });
+  if (Number(appointment.PatientID) !== Number(patientId) || Number(appointment.DoctorID) !== Number(doctorId)) {
+    return res.status(400).json({ message: "Prescription must match appointment patient and doctor" });
+  }
+  if (req.user.role === "Doctor") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
+    if (Number(actor.DoctorID) !== Number(doctorId)) {
+      return res.status(403).json({ message: "Doctors can only create prescriptions under their own profile" });
+    }
+    effectiveDoctorId = actor.DoctorID;
+  }
+
   const created = await pool
     .request()
     .input("AppointmentID", sql.Int, appointmentId)
     .input("PatientID", sql.Int, patientId)
-    .input("DoctorID", sql.Int, doctorId)
+    .input("DoctorID", sql.Int, effectiveDoctorId)
     .input("PrescriptionDate", sql.Date, prescriptionDate || null)
     .input("Diagnosis", sql.NVarChar(sql.MAX), diagnosis || null)
     .query(`

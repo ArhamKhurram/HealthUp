@@ -1,11 +1,37 @@
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
 
+const getActorContext = async (pool, userId) => {
+  const result = await pool
+    .request()
+    .input("UserID", sql.Int, userId)
+    .query(`
+      SELECT
+        (SELECT TOP 1 PatientID FROM Patients WHERE UserID = @UserID) AS PatientID,
+        (SELECT TOP 1 DoctorID FROM Doctors WHERE UserID = @UserID) AS DoctorID
+    `);
+  return result.recordset[0] || { PatientID: null, DoctorID: null };
+};
+
 const listAdmissions = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool.request().query(`
+  const request = pool.request();
+  let whereClause = "";
+  if (req.user.role === "Patient") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
+    request.input("ActorPatientID", sql.Int, actor.PatientID);
+    whereClause = "WHERE a.PatientID = @ActorPatientID";
+  } else if (req.user.role === "Doctor") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
+    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
+    whereClause = "WHERE a.AttendingDoctorID = @ActorDoctorID";
+  }
+  const result = await request.query(`
     SELECT a.AdmissionID, a.AdmissionDate, a.DischargeDate, a.AdmissionType,
            a.Status, a.ClinicalDiagnosis, p.MRNumber,
+           a.PatientID, a.AttendingDoctorID, a.BedID, a.WardID,
            patientUser.FullName AS PatientName, doctorUser.FullName AS DoctorName,
            w.WardName, b.BedNumber
     FROM IPDAdmissions a
@@ -15,6 +41,7 @@ const listAdmissions = asyncHandler(async (req, res) => {
     INNER JOIN Users doctorUser ON doctorUser.UserID = d.UserID
     INNER JOIN Wards w ON w.WardID = a.WardID
     INNER JOIN Beds b ON b.BedID = a.BedID
+    ${whereClause}
     ORDER BY a.AdmissionDate DESC
   `);
   res.json(result.recordset);
@@ -22,13 +49,23 @@ const listAdmissions = asyncHandler(async (req, res) => {
 
 const getAdmission = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
-    .input("AdmissionID", sql.Int, req.params.id)
-    .query(`
+  const request = pool.request().input("AdmissionID", sql.Int, req.params.id);
+  let whereClause = "WHERE AdmissionID = @AdmissionID";
+  if (req.user.role === "Patient") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
+    request.input("ActorPatientID", sql.Int, actor.PatientID);
+    whereClause += " AND PatientID = @ActorPatientID";
+  } else if (req.user.role === "Doctor") {
+    const actor = await getActorContext(pool, req.user.userId);
+    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
+    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
+    whereClause += " AND AttendingDoctorID = @ActorDoctorID";
+  }
+  const result = await request.query(`
       SELECT *
       FROM IPDAdmissions
-      WHERE AdmissionID = @AdmissionID
+      ${whereClause}
     `);
 
   if (!result.recordset[0]) {
