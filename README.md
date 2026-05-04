@@ -13,7 +13,9 @@ HealthUp is a database-driven healthcare management system built for SQL Server,
 
 ```text
 backend/
-  database/schema.sql
+  database/schema_simplified.sql
+  database/seed_simplified.sql
+  database/legacy/
   src/
     config/db.js
     controllers/
@@ -28,6 +30,8 @@ frontend/
     pages/
 docs/
   RELEASE_CANDIDATE.md
+  erd-simplified-phase2.md
+  schema-reset-migration-plan.md
 ```
 
 ## Getting Started
@@ -45,8 +49,8 @@ docker run -d \
 ```
 
 2. Create database `HealthUp`, then run:
-   - `backend/database/schema.sql`
-   - `backend/database/seed.sql` (recommended for demo users/data)
+   - `backend/database/schema_simplified.sql`
+   - `backend/database/seed_simplified.sql` (recommended for demo users/data)
 3. Configure backend `.env` (or use defaults):
    - `PORT=5001`
    - `CLIENT_ORIGIN=http://127.0.0.1:5173`
@@ -67,7 +71,7 @@ npm install
 npm run dev
 ```
 
-Demo logins from `seed.sql`:
+Demo logins from `seed_simplified.sql`:
 
 - `admin@healthup.test` / `password`
 - `patient@healthup.test` / `password`
@@ -81,3 +85,8 @@ Default local URLs:
 
 Release notes and QA evidence:
 - `docs/RELEASE_CANDIDATE.md`
+- `docs/erd-simplified-phase2.md`
+- `docs/schema-reset-migration-plan.md`
+
+Legacy SQL scripts are archived at:
+- `backend/database/legacy/`

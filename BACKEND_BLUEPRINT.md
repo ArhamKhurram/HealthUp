@@ -1,5 +1,44 @@
 # Backend Blueprint
 
+## Evaluation Scope Lock (May 2026)
+
+For Monday project evaluation, we are using a **Demo Core** scope to reduce complexity and maximize reliability.
+
+### Demo Core (in-scope)
+- Auth + role-based users (`Users`, `Patients`, `Doctors`, `Nurses`)
+- Departments / Wards / Beds / OPD Rooms
+- OPD appointments (30-minute slots, schedule-aware)
+- OPD prescriptions
+- OPD payments (manual receptionist confirmation model)
+- IPD admissions (doctor + ward/bed consistency)
+- Basic reports required for verification
+
+### Deferred / Optional (phase 2)
+- Surgery + OT workflows
+- Extended inventory and non-critical modules not required in core demo
+- Placeholder-only UI routes
+
+## Phase 2: Schema Reset (From Scratch, Simplified)
+
+Objective: replace the current bloated model with a compact evaluation-friendly schema.
+
+Planned target:
+- ~15 core tables
+- unified `Prescriptions`, `TestOrders`, `Payments`, `BillingDetails`
+- simplified appointment statuses: `Pending`, `Confirmed`, `Completed`
+
+Execution sequence:
+1. Create new baseline script: `backend/database/schema_simplified.sql`
+2. Add matching seed script for demo flows.
+3. Update backend queries/controllers route-by-route to new table names.
+4. Update frontend payloads/forms to new contracts.
+5. Run full smoke test and retire old schema scripts only after parity is confirmed.
+
+The implementation policy is:
+1. Keep strict DB integrity constraints for demo-core entities.
+2. Hide or defer unfinished/placeholder flows from navigation.
+3. Verify all demo-core flows through interface-driven smoke tests.
+
 This scratch blueprint assumes:
 
 - SQL Server managed through SSMS.

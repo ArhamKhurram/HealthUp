@@ -2317,27 +2317,3 @@ export function NurseDutyRosterPage({ user }) {
     </>
   );
 }
-
-export function PlaceholderPage({ title, role }) {
-  if (role === "Admin" && title === "Medications") return <MedicationsManagement />;
-  if (role === "Admin" && title === "Medical Tests") return <MedicalTestsManagement />;
-  if (role === "Admin" && title === "Reports") return <ReportsPage />;
-  if (role === "Admin" && title === "Inventory") {
-    return (
-      <>
-        <PageHeader eyebrow={role} title={title} icon={Pill} />
-        <article className="data-panel form-panel">
-          <p className="muted">Inventory actions are currently managed through Medications. Use the Medications page to review stock and update quantities.</p>
-        </article>
-      </>
-    );
-  }
-  return (
-    <>
-      <PageHeader eyebrow={role} title={title} icon={Activity} />
-      <article className="data-panel form-panel">
-        <p className="muted">This section is available in navigation, but no role-specific workflow has been configured here yet.</p>
-      </article>
-    </>
-  );
-}

@@ -32,7 +32,6 @@ import {
   OrderOpdTests,
   PatientDashboard,
   PaymentsPage,
-  PlaceholderPage,
   ProfilePage,
   ProgressNotesPage,
   ReceptionDashboard,
@@ -80,10 +79,6 @@ function App() {
     if (!canView) {
       return <Unauthorized />;
     }
-    if (currentRoute.placeholder) {
-      return <PlaceholderPage title={currentRoute.label} role={user.role} />;
-    }
-
     switch (currentRoute.view) {
       case "adminDashboard":
         return <AdminDashboard />;
