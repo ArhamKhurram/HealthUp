@@ -45,6 +45,7 @@ IF OBJECT_ID('TestOrders', 'U') IS NOT NULL DROP TABLE TestOrders;
 IF OBJECT_ID('PrescriptionMedications', 'U') IS NOT NULL DROP TABLE PrescriptionMedications;
 IF OBJECT_ID('Prescriptions', 'U') IS NOT NULL DROP TABLE Prescriptions;
 IF OBJECT_ID('Reviews', 'U') IS NOT NULL DROP TABLE Reviews;
+IF OBJECT_ID('PatientVitals', 'U') IS NOT NULL DROP TABLE PatientVitals;
 IF OBJECT_ID('IPDAdmissions', 'U') IS NOT NULL DROP TABLE IPDAdmissions;
 IF OBJECT_ID('OPDAppointments', 'U') IS NOT NULL DROP TABLE OPDAppointments;
 IF OBJECT_ID('Inventory', 'U') IS NOT NULL DROP TABLE Inventory;
@@ -167,10 +168,33 @@ CREATE TABLE OPDAppointments (
   AppointmentType NVARCHAR(50) NOT NULL DEFAULT 'Consultation',
   Status NVARCHAR(20) NOT NULL DEFAULT 'Pending',
   ChiefComplaint NVARCHAR(MAX) NULL,
+
+  -- Foreign keys: appointments belong to patients and doctors
   CONSTRAINT FK_OPDAppointments_Patients FOREIGN KEY (PatientID) REFERENCES Patients(PatientID),
   CONSTRAINT FK_OPDAppointments_Doctors FOREIGN KEY (DoctorID) REFERENCES Doctors(DoctorID),
-  CONSTRAINT CK_OPDAppointments_Status CHECK (Status IN ('Pending', 'Confirmed', 'Completed'))
+
+  -- Status workflow: Pending → Confirmed → Completed.
+  -- Receptionists and Admins can transition Pending ↔ Confirmed; Doctors set to Completed.
+  -- Once Completed, no further edits allowed (enforced in application layer).
+  CONSTRAINT CK_OPDAppointments_Status CHECK (Status IN ('Pending', 'Confirmed', 'Completed')),
+
+  -- A doctor cannot have two active (Pending/Confirmed) appointments at the same datetime slot.
+  -- Enforced via filtered unique index below.
 );
+GO
+
+/* Indexes for OPDAppointments (performance for common lookups):
+   • By date descending for list views
+   • By patient for patient history
+   • By doctor for doctor schedules
+   • Composite index for the active-slot uniqueness filter and scheduling queries
+*/
+CREATE NONCLUSTERED INDEX IX_OPDAppointments_Date_Status ON OPDAppointments (AppointmentDateTime DESC, Status);
+CREATE NONCLUSTERED INDEX IX_OPDAppointments_Patient ON OPDAppointments (PatientID, AppointmentDateTime DESC);
+CREATE NONCLUSTERED INDEX IX_OPDAppointments_Doctor ON OPDAppointments (DoctorID, AppointmentDateTime DESC);
+-- Used by the unique constraint above and slot-booking queries
+CREATE NONCLUSTERED INDEX IX_OPDAppointments_Doctor_Slot_Status ON OPDAppointments (DoctorID, AppointmentDateTime) WHERE Status IN ('Pending', 'Confirmed');
+CREATE UNIQUE NONCLUSTERED INDEX UQ_OPDAppointments_Doctor_Active_Slot ON OPDAppointments (DoctorID, AppointmentDateTime) WHERE Status IN ('Pending', 'Confirmed');
 GO
 
 CREATE TABLE IPDAdmissions (
@@ -298,4 +322,244 @@ CREATE TABLE Reviews (
   CONSTRAINT FK_Reviews_Doctors FOREIGN KEY (DoctorID) REFERENCES Doctors(DoctorID),
   CONSTRAINT CK_Reviews_Rating CHECK (Rating BETWEEN 1 AND 5)
 );
+GO
+
+/* Flow: Nurse records vitals/progress for an admitted IPD patient; doctor/admin views timeline in patient details. */
+CREATE TABLE PatientVitals (
+  VitalID INT IDENTITY(1,1) PRIMARY KEY,
+  AdmissionID INT NOT NULL,
+  PatientID INT NOT NULL,
+  NurseID INT NOT NULL,
+  RecordedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+  TemperatureC DECIMAL(4,1) NULL,
+  SystolicBP INT NULL,
+  DiastolicBP INT NULL,
+  HeartRate INT NULL,
+  RespiratoryRate INT NULL,
+  OxygenSaturation INT NULL,
+  ProgressNote NVARCHAR(MAX) NULL,
+  CONSTRAINT FK_PatientVitals_Admissions FOREIGN KEY (AdmissionID) REFERENCES IPDAdmissions(AdmissionID),
+  CONSTRAINT FK_PatientVitals_Patients FOREIGN KEY (PatientID) REFERENCES Patients(PatientID),
+  CONSTRAINT FK_PatientVitals_Nurses FOREIGN KEY (NurseID) REFERENCES Nurses(NurseID),
+  CONSTRAINT CK_PatientVitals_Temp CHECK (TemperatureC IS NULL OR (TemperatureC >= 30 AND TemperatureC <= 45)),
+  CONSTRAINT CK_PatientVitals_BP CHECK (
+    (SystolicBP IS NULL AND DiastolicBP IS NULL) OR
+    (SystolicBP IS NOT NULL AND DiastolicBP IS NOT NULL AND SystolicBP BETWEEN 60 AND 260 AND DiastolicBP BETWEEN 40 AND 180)
+  ),
+  CONSTRAINT CK_PatientVitals_HeartRate CHECK (HeartRate IS NULL OR HeartRate BETWEEN 20 AND 260),
+  CONSTRAINT CK_PatientVitals_RespRate CHECK (RespiratoryRate IS NULL OR RespiratoryRate BETWEEN 5 AND 80),
+  CONSTRAINT CK_PatientVitals_O2 CHECK (OxygenSaturation IS NULL OR OxygenSaturation BETWEEN 50 AND 100),
+  CONSTRAINT CK_PatientVitals_Content CHECK (
+    ProgressNote IS NOT NULL OR TemperatureC IS NOT NULL OR SystolicBP IS NOT NULL OR HeartRate IS NOT NULL OR RespiratoryRate IS NOT NULL OR OxygenSaturation IS NOT NULL
+  )
+);
+GO
+
+CREATE OR ALTER VIEW vw_PatientVitalHistory
+AS
+SELECT
+  v.VitalID,
+  v.AdmissionID,
+  v.PatientID,
+  pu.FullName AS PatientName,
+  v.NurseID,
+  nu.FullName AS NurseName,
+  v.RecordedAt,
+  v.TemperatureC,
+  v.SystolicBP,
+  v.DiastolicBP,
+  v.HeartRate,
+  v.RespiratoryRate,
+  v.OxygenSaturation,
+  v.ProgressNote
+FROM PatientVitals v
+INNER JOIN Patients p ON p.PatientID = v.PatientID
+INNER JOIN Users pu ON pu.UserID = p.UserID
+INNER JOIN Nurses n ON n.NurseID = v.NurseID
+INNER JOIN Users nu ON nu.UserID = n.UserID;
+GO
+
+/* Flow 1C (Nurse Vitals): Nurse submits vitals/progress for selected admission; inserts normalized row. */
+CREATE OR ALTER PROCEDURE sp_RecordPatientVital
+  @AdmissionID INT,
+  @NurseID INT,
+  @TemperatureC DECIMAL(4,1) = NULL,
+  @SystolicBP INT = NULL,
+  @DiastolicBP INT = NULL,
+  @HeartRate INT = NULL,
+  @RespiratoryRate INT = NULL,
+  @OxygenSaturation INT = NULL,
+  @ProgressNote NVARCHAR(MAX) = NULL
+AS
+BEGIN
+  SET NOCOUNT ON;
+
+  DECLARE @PatientID INT;
+  SELECT @PatientID = PatientID FROM IPDAdmissions WHERE AdmissionID = @AdmissionID;
+
+  IF @PatientID IS NULL
+    THROW 50001, 'Admission not found.', 1;
+
+  INSERT INTO PatientVitals (
+    AdmissionID, PatientID, NurseID, TemperatureC, SystolicBP, DiastolicBP, HeartRate, RespiratoryRate, OxygenSaturation, ProgressNote
+  )
+  VALUES (
+    @AdmissionID, @PatientID, @NurseID, @TemperatureC, @SystolicBP, @DiastolicBP, @HeartRate, @RespiratoryRate, @OxygenSaturation, @ProgressNote
+  );
+
+  SELECT * FROM vw_PatientVitalHistory WHERE VitalID = SCOPE_IDENTITY();
+END;
+GO
+
+/* Flow 1C (Vital History): Doctor/Nurse/Admin fetches timeline for selected admission in patient details page. */
+CREATE OR ALTER PROCEDURE sp_GetPatientVitalHistory
+  @AdmissionID INT
+AS
+BEGIN
+  SET NOCOUNT ON;
+  SELECT *
+  FROM vw_PatientVitalHistory
+  WHERE AdmissionID = @AdmissionID
+  ORDER BY RecordedAt DESC, VitalID DESC;
+END;
+GO
+
+CREATE OR ALTER VIEW vw_UserAuthProfile
+AS
+SELECT u.UserID, u.FullName, u.Email, u.Password, u.Role, u.Phone, u.Address, u.IsActive,
+       p.PatientID, d.DoctorID, n.NurseID
+FROM Users u
+LEFT JOIN Patients p ON p.UserID = u.UserID
+LEFT JOIN Doctors d ON d.UserID = u.UserID
+LEFT JOIN Nurses n ON n.UserID = u.UserID;
+GO
+
+CREATE OR ALTER VIEW vw_IPDAdmissionDetails
+AS
+SELECT a.AdmissionID, a.PatientID, a.DoctorID, a.DepartmentID,
+       a.AdmissionDate, a.DischargeDate, a.Status, a.BedNumber, a.Diagnosis,
+       a.DoctorID AS AttendingDoctorID,
+       a.DepartmentID AS WardID,
+       CAST(NULL AS int) AS BedID,
+       'General' AS AdmissionType,
+       a.Diagnosis AS ClinicalDiagnosis,
+       p.MRNumber,
+       pu.FullName AS PatientName,
+       du.FullName AS DoctorName,
+       dep.DepartmentName,
+       dep.DepartmentName AS WardName
+FROM IPDAdmissions a
+INNER JOIN Patients p ON p.PatientID = a.PatientID
+INNER JOIN Users pu ON pu.UserID = p.UserID
+INNER JOIN Doctors d ON d.DoctorID = a.DoctorID
+INNER JOIN Users du ON du.UserID = d.UserID
+INNER JOIN Departments dep ON dep.DepartmentID = a.DepartmentID;
+GO
+
+CREATE OR ALTER VIEW vw_PaymentSummary
+AS
+SELECT pay.PaymentID, pay.PatientID, pay.AppointmentID, pay.AdmissionID,
+       pay.TotalAmount, pay.PaidAmount, pay.Status, pay.PaymentMethod, pay.ReferenceNo,
+       pay.ReceivedByUserID, pay.PaidAt, pay.CreatedAt,
+       pu.FullName AS PatientName, ru.FullName AS ReceivedByName
+FROM Payments pay
+INNER JOIN Patients p ON p.PatientID = pay.PatientID
+INNER JOIN Users pu ON pu.UserID = p.UserID
+LEFT JOIN Users ru ON ru.UserID = pay.ReceivedByUserID;
+GO
+
+CREATE OR ALTER PROCEDURE sp_LoginUser @Email NVARCHAR(150)
+AS
+BEGIN
+  SET NOCOUNT ON;
+  SELECT * FROM vw_UserAuthProfile WHERE Email = @Email;
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_RegisterPatient
+  @FullName NVARCHAR(120), @Email NVARCHAR(150), @Password NVARCHAR(255),
+  @Phone NVARCHAR(30) = NULL, @Address NVARCHAR(255) = NULL, @MRNumber NVARCHAR(50),
+  @DateOfBirth DATE, @Gender NVARCHAR(20), @BloodGroup NVARCHAR(10) = NULL,
+  @EmergencyContact NVARCHAR(50) = NULL, @Allergies NVARCHAR(MAX) = NULL, @ChronicConditions NVARCHAR(MAX) = NULL
+AS
+BEGIN
+  SET NOCOUNT ON;
+  BEGIN TRAN;
+  BEGIN TRY
+    INSERT INTO Users (FullName, Email, Password, Role, Phone, Address)
+    VALUES (@FullName, @Email, @Password, 'Patient', @Phone, @Address);
+    DECLARE @UserID INT = SCOPE_IDENTITY();
+    INSERT INTO Patients (UserID, MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions)
+    VALUES (@UserID, @MRNumber, @DateOfBirth, @Gender, @BloodGroup, @EmergencyContact, @Allergies, @ChronicConditions);
+    SELECT u.UserID, u.FullName, u.Email, u.Role, p.PatientID, p.MRNumber
+    FROM Users u INNER JOIN Patients p ON p.UserID = u.UserID WHERE u.UserID = @UserID;
+    COMMIT TRAN;
+  END TRY
+  BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK TRAN;
+    THROW;
+  END CATCH
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_ListIPDAdmissions @PatientID INT = NULL, @DoctorID INT = NULL
+AS
+BEGIN
+  SET NOCOUNT ON;
+  SELECT * FROM vw_IPDAdmissionDetails
+  WHERE (@PatientID IS NULL OR PatientID = @PatientID) AND (@DoctorID IS NULL OR DoctorID = @DoctorID)
+  ORDER BY AdmissionDate DESC;
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_CreateIPDAdmission
+  @PatientID INT, @DoctorID INT, @DepartmentID INT, @BedNumber NVARCHAR(30), @Diagnosis NVARCHAR(MAX) = NULL
+AS
+BEGIN
+  SET NOCOUNT ON;
+  INSERT INTO IPDAdmissions (PatientID, DoctorID, DepartmentID, BedNumber, Diagnosis, Status)
+  VALUES (@PatientID, @DoctorID, @DepartmentID, @BedNumber, @Diagnosis, 'Admitted');
+  SELECT * FROM vw_IPDAdmissionDetails WHERE AdmissionID = SCOPE_IDENTITY();
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_UpdateIPDAdmission
+  @AdmissionID INT, @PatientID INT, @DoctorID INT, @DepartmentID INT, @BedNumber NVARCHAR(30),
+  @Diagnosis NVARCHAR(MAX) = NULL, @Status NVARCHAR(30), @DischargeDate DATETIME2 = NULL
+AS
+BEGIN
+  SET NOCOUNT ON;
+  UPDATE IPDAdmissions
+  SET PatientID = @PatientID, DoctorID = @DoctorID, DepartmentID = @DepartmentID, BedNumber = @BedNumber,
+      Diagnosis = @Diagnosis, Status = @Status,
+      DischargeDate = CASE WHEN @Status = 'Discharged' THEN COALESCE(@DischargeDate, SYSDATETIME()) ELSE @DischargeDate END
+  WHERE AdmissionID = @AdmissionID;
+  SELECT * FROM vw_IPDAdmissionDetails WHERE AdmissionID = @AdmissionID;
+END;
+GO
+
+CREATE OR ALTER PROCEDURE sp_RecordPayment
+  @PatientID INT, @AppointmentID INT = NULL, @AdmissionID INT = NULL, @TotalAmount DECIMAL(10,2),
+  @PaidAmount DECIMAL(10,2), @Status NVARCHAR(30), @PaymentMethod NVARCHAR(50),
+  @ReferenceNo NVARCHAR(80) = NULL, @ReceivedByUserID INT = NULL
+AS
+BEGIN
+  SET NOCOUNT ON;
+  INSERT INTO Payments (PatientID, AppointmentID, AdmissionID, TotalAmount, PaidAmount, Status, PaymentMethod, ReferenceNo, ReceivedByUserID, PaidAt)
+  VALUES (@PatientID, @AppointmentID, @AdmissionID, @TotalAmount, @PaidAmount, @Status, @PaymentMethod, @ReferenceNo, @ReceivedByUserID, CASE WHEN @Status='Paid' THEN SYSDATETIME() ELSE NULL END);
+  SELECT * FROM vw_PaymentSummary WHERE PaymentID = SCOPE_IDENTITY();
+END;
+GO
+
+CREATE OR ALTER TRIGGER trg_Payments_SetPaidAt ON Payments
+AFTER UPDATE
+AS
+BEGIN
+  SET NOCOUNT ON;
+  UPDATE p
+  SET PaidAt = COALESCE(p.PaidAt, SYSUTCDATETIME())
+  FROM Payments p
+  INNER JOIN inserted i ON i.PaymentID = p.PaymentID
+  WHERE i.Status = 'Paid';
+END;
 GO

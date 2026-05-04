@@ -515,13 +515,98 @@ export function BookAppointment({ user }) {
             <p className="muted">Appointments are booked at reception. Use this page to review scheduled appointments.</p>
           )}
         </article>
-        <AppointmentList title="Recent Appointments" rows={appointments.data} />
+        <AppointmentList title="Recent Appointments" rows={appointments.data} user={user} />
       </section>
     </>
   );
 }
 
-function AppointmentList({ title, rows }) {
+function AppointmentList({ title, rows, user }) {
+  const canEdit = user && (user.role === "Receptionist" || user.role === "Admin");
+  const canComplete = user && user.role === "Doctor";
+
+  const patients = useApi("/patients");
+  const doctors = useApi("/doctors");
+  const appointments = useApi("/opd/appointments"); // for reload
+
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm, setEditForm] = useState({
+    appointmentId: "", patientId: "", doctorId: "", appointmentDate: "", appointmentTime: "",
+    appointmentType: "Consultation", status: "Pending", chiefComplaint: ""
+  });
+  const [slots, setSlots] = useState([]);
+  const [editMessage, setEditMessage] = useState("");
+
+  const openEdit = (appointment) => {
+    const d = new Date(appointment.AppointmentDate);
+    // Normalize status property name (handle both capital and lowercase)
+    const status = appointment.Status || appointment.status || "Pending";
+    setEditForm({
+      appointmentId: appointment.AppointmentID,
+      patientId: appointment.PatientID,
+      doctorId: appointment.DoctorID,
+      appointmentDate: d.toISOString().split("T")[0],
+      appointmentTime: d.toTimeString().slice(0, 5),
+      appointmentType: appointment.AppointmentType || "Consultation",
+      status,
+      chiefComplaint: appointment.ChiefComplaint || ""
+    });
+    setEditMessage("");
+    setEditOpen(true);
+  };
+
+  const closeEdit = () => setEditOpen(false);
+
+  useEffect(() => {
+    if (!editOpen) return;
+    const loadSlots = async () => {
+      if (!editForm.doctorId || !editForm.appointmentDate) {
+        setSlots([]);
+        return;
+      }
+      try {
+        const { data } = await api.get(`/opd/doctors/${editForm.doctorId}/available-slots`, {
+          params: { date: editForm.appointmentDate }
+        });
+        setSlots(data);
+      } catch { setSlots([]); }
+    };
+    loadSlots();
+  }, [editOpen, editForm.doctorId, editForm.appointmentDate]);
+
+  const handleMarkComplete = async (appointmentId) => {
+    if (!window.confirm("Mark this appointment as Completed?")) return;
+    try {
+      await api.put(`/opd/appointments/${appointmentId}`, { status: "Completed" });
+      appointments.reload();
+    } catch (error) {
+      alert(error.response?.data?.message || "Failed to complete appointment");
+    }
+  };
+
+  const handleUpdate = async (e) => {
+    e.preventDefault();
+    setEditMessage("");
+    const appointmentDateTime = editForm.appointmentDate && editForm.appointmentTime ? `${editForm.appointmentDate}T${editForm.appointmentTime}` : "";
+    try {
+      await api.put(`/opd/appointments/${editForm.appointmentId}`, {
+        patientId: Number(editForm.patientId),
+        doctorId: Number(editForm.doctorId),
+        appointmentDateTime,
+        appointmentType: editForm.appointmentType,
+        status: editForm.status,
+        chiefComplaint: editForm.chiefComplaint
+      });
+      setEditMessage("Appointment updated.");
+      setEditOpen(false);
+      appointments.reload();
+    } catch (error) {
+      setEditMessage(error.response?.data?.message || "Failed to update appointment");
+    }
+  };
+
+  const updateEditField = (field, value) => setEditForm(c => ({ ...c, [field]: value }));
+
   return (
     <article className="data-panel wide-panel">
       <header><div><CalendarDays size={20} /><h2>{title}</h2></div><span>{rows.length}</span></header>
@@ -532,9 +617,98 @@ function AppointmentList({ title, rows }) {
           { key: "PatientName", label: "Patient" },
           { key: "DoctorName", label: "Doctor" },
           { key: "AppointmentDate", label: "Date", render: (row) => new Date(row.AppointmentDate).toLocaleString() },
-          { key: "Status", label: "Status" }
+          { key: "Status", label: "Status" },
+          ...(canEdit ? [{
+            key: "actions",
+            label: "Actions",
+            render: (row) => (
+              <button
+                type="button"
+                onClick={() => openEdit(row)}
+                title="Edit appointment"
+                disabled={row.Status === "Completed"}
+                style={{ cursor: row.Status === "Completed" ? "not-allowed" : "pointer", opacity: row.Status === "Completed" ? 0.5 : 1 }}
+              >
+                Edit
+              </button>
+            )
+          }] : []),
+          ...(canComplete ? [{
+            key: "complete",
+            label: "",
+            render: (row) => row.Status !== "Completed" ? (
+              <button
+                type="button"
+                onClick={() => handleMarkComplete(row.AppointmentID)}
+                title="Mark as completed"
+                style={{ cursor: "pointer", fontSize: "1.2em", background: "none", border: "none", padding: 0 }}
+              >
+                ☐
+              </button>
+            ) : null
+          }] : [])
         ]}
       />
+
+      {/* Edit Modal */}
+      {editOpen && (
+        <div className="modal-overlay" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'grid', placeItems: 'center', zIndex: 1000 }}>
+          <article className="data-panel form-panel" style={{ maxWidth: 600, width: '95%' }}>
+            <header><div><CalendarDays size={20} /><h2>Edit Appointment</h2></div></header>
+            <form onSubmit={handleUpdate}>
+              <Field label="Patient">
+                <SelectInput
+                  value={editForm.patientId}
+                  onChange={(v) => updateEditField("patientId", v)}
+                  required
+                  options={patients.data.map((p) => ({ value: p.PatientID, label: `${p.FullName} (${p.MRNumber})` }))}
+                />
+              </Field>
+              <Field label="Doctor">
+                <SelectInput
+                  value={editForm.doctorId}
+                  onChange={(v) => { updateEditField("doctorId", v); updateEditField("appointmentTime", ""); }}
+                  required
+                  options={doctors.data.map((d) => ({ value: d.DoctorID, label: `${d.FullName} - ${d.Specialization}` }))}
+                />
+              </Field>
+              <Field label="Appointment date">
+                <TextInput type="date" value={editForm.appointmentDate} onChange={(v) => { updateEditField("appointmentDate", v); updateEditField("appointmentTime", ""); }} required />
+              </Field>
+              <Field label="Available slot">
+                <SelectInput
+                  value={editForm.appointmentTime}
+                  onChange={(v) => updateEditField("appointmentTime", v)}
+                  required
+                  options={slots.map((s) => ({ value: s.time, label: s.time }))}
+                />
+              </Field>
+              <Field label="Appointment type">
+                <SelectInput
+                  value={editForm.appointmentType}
+                  onChange={(v) => updateEditField("appointmentType", v)}
+                  options={["Consultation", "Follow-up", "Emergency"].map(t => ({ value: t, label: t }))}
+                />
+              </Field>
+              <Field label="Status">
+                <SelectInput
+                  value={editForm.status}
+                  onChange={(v) => updateEditField("status", v)}
+                  options={["Pending", "Confirmed"].map(s => ({ value: s, label: s }))} // Cannot set to Completed manually
+                />
+              </Field>
+              <Field label="Chief complaint">
+                <TextInput value={editForm.chiefComplaint} onChange={(v) => updateEditField("chiefComplaint", v)} />
+              </Field>
+              <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                <button type="button" onClick={closeEdit} style={{ background: '#666' }}>Cancel</button>
+                <button type="submit"><Save size={18} />Save changes</button>
+              </div>
+              {editMessage && <p className={editMessage.startsWith("Failed") ? "error" : "success"}>{editMessage}</p>}
+            </form>
+          </article>
+        </div>
+      )}
     </article>
   );
 }
@@ -546,7 +720,7 @@ export function DoctorAppointments({ user }) {
   return (
     <>
       <PageHeader eyebrow="Doctor" title="OPD Appointments" icon={CalendarDays} />
-      <AppointmentList title="Assigned Appointments" rows={rows} />
+      <AppointmentList title="Assigned Appointments" rows={rows} user={user} />
     </>
   );
 }
@@ -634,10 +808,10 @@ export function PatientDashboard({ user }) {
           { label: "Payments", value: myPayments.length }
         ]}
       />
-      <section className="panel-grid">
-        <AppointmentList title="My Appointments" rows={myAppointments} />
-        <PaymentsPanel rows={myPayments} />
-      </section>
+       <section className="panel-grid">
+         <AppointmentList title="My Appointments" rows={myAppointments} user={user} />
+         <PaymentsPanel rows={myPayments} />
+       </section>
     </>
   );
 }
@@ -668,7 +842,7 @@ export function MyAppointments({ user }) {
   return (
     <>
       <PageHeader eyebrow="Patient" title="My Appointments" icon={CalendarDays} />
-      <AppointmentList title="Appointment History" rows={rows} />
+      <AppointmentList title="Appointment History" rows={rows} user={user} />
     </>
   );
 }
@@ -1933,45 +2107,76 @@ export function IpdPatients({ user }) {
 
 export function ProgressNotesPage({ user }) {
   const admissions = useApi("/ipd/admissions");
-  const [form, setForm] = useState({ admissionId: "", vitalSigns: "", progressNotes: "" });
+  const [form, setForm] = useState({
+    admissionId: "",
+    temperatureC: "",
+    systolicBP: "",
+    diastolicBP: "",
+    heartRate: "",
+    respiratoryRate: "",
+    oxygenSaturation: "",
+    progressNote: ""
+  });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+
+  if (user.role !== "Nurse") {
+    return (
+      <>
+        <PageHeader eyebrow={user.role} title="Add Vitals / Progress Notes" icon={ClipboardPlus} />
+        <article className="data-panel form-panel">
+          <p className="muted">Only nurses can record vitals/progress entries.</p>
+        </article>
+      </>
+    );
+  }
+
   const submit = async (event) => {
     event.preventDefault();
     setMessage("");
     setError("");
-    // Minimal DB interaction path: reuse IPD diagnosis update as progress update for demo
-    const selected = admissions.data.find((a) => String(a.AdmissionID) === String(form.admissionId));
-    if (!selected) {
-      setError("Select a valid admission.");
-      return;
-    }
     try {
-      await api.put(`/ipd/admissions/${form.admissionId}`, {
-        patientId: selected.PatientID,
-        attendingDoctorId: selected.AttendingDoctorID,
-        bedId: selected.BedID,
-        wardId: selected.WardID,
-        admissionType: selected.AdmissionType,
-        status: selected.Status,
-        clinicalDiagnosis: `${selected.ClinicalDiagnosis || ""}\n[Progress] ${form.vitalSigns} ${form.progressNotes}`.trim()
+      await api.post(`/ipd/admissions/${form.admissionId}/vitals`, {
+        temperatureC: form.temperatureC === "" ? null : Number(form.temperatureC),
+        systolicBP: form.systolicBP === "" ? null : Number(form.systolicBP),
+        diastolicBP: form.diastolicBP === "" ? null : Number(form.diastolicBP),
+        heartRate: form.heartRate === "" ? null : Number(form.heartRate),
+        respiratoryRate: form.respiratoryRate === "" ? null : Number(form.respiratoryRate),
+        oxygenSaturation: form.oxygenSaturation === "" ? null : Number(form.oxygenSaturation),
+        progressNote: form.progressNote || null
       });
-      setMessage("Vitals/progress entry appended to clinical diagnosis.");
-      setForm({ admissionId: "", vitalSigns: "", progressNotes: "" });
+      setMessage("Vitals/progress note saved.");
+      setForm({
+        admissionId: "",
+        temperatureC: "",
+        systolicBP: "",
+        diastolicBP: "",
+        heartRate: "",
+        respiratoryRate: "",
+        oxygenSaturation: "",
+        progressNote: ""
+      });
       admissions.reload();
     } catch (requestError) {
       setError(requestError.response?.data?.message || "Unable to save progress note.");
     }
   };
-  const mine = admissions.data.filter((a) => user.role === "Nurse" || !user.doctorId || a.AttendingDoctorID === user.doctorId);
+  const mine = admissions.data;
   return (
     <>
       <PageHeader eyebrow={user.role} title="Add Vitals / Progress Notes" icon={ClipboardPlus} />
       <article className="data-panel form-panel"><form onSubmit={submit}>
-        <p className="muted">Temporary workflow: this appends entries to the admission clinical diagnosis field until a dedicated nurse notes endpoint is available.</p>
+        <p className="muted">Nurse-only flow. Record vitals and progress for admitted patients. Leave fields blank if not measured.</p>
         <Field label="Admission"><SelectInput value={form.admissionId} onChange={(v) => setForm((c) => ({ ...c, admissionId: v }))} options={mine.map((a) => ({ value: a.AdmissionID, label: `#${a.AdmissionID} ${a.PatientName}` }))} required /></Field>
-        <Field label="Vitals"><TextInput value={form.vitalSigns} onChange={(v) => setForm((c) => ({ ...c, vitalSigns: v }))} /></Field>
-        <Field label="Progress note"><TextInput value={form.progressNotes} onChange={(v) => setForm((c) => ({ ...c, progressNotes: v }))} /></Field>
+        <div className="form-grid">
+          <Field label="Temperature (C)"><TextInput type="number" value={form.temperatureC} onChange={(v) => setForm((c) => ({ ...c, temperatureC: v }))} /></Field>
+          <Field label="Heart rate"><TextInput type="number" value={form.heartRate} onChange={(v) => setForm((c) => ({ ...c, heartRate: v }))} /></Field>
+          <Field label="Respiratory rate"><TextInput type="number" value={form.respiratoryRate} onChange={(v) => setForm((c) => ({ ...c, respiratoryRate: v }))} /></Field>
+          <Field label="Oxygen saturation"><TextInput type="number" value={form.oxygenSaturation} onChange={(v) => setForm((c) => ({ ...c, oxygenSaturation: v }))} /></Field>
+          <Field label="Systolic BP"><TextInput type="number" value={form.systolicBP} onChange={(v) => setForm((c) => ({ ...c, systolicBP: v }))} /></Field>
+          <Field label="Diastolic BP"><TextInput type="number" value={form.diastolicBP} onChange={(v) => setForm((c) => ({ ...c, diastolicBP: v }))} /></Field>
+        </div>
+        <Field label="Progress note"><TextInput value={form.progressNote} onChange={(v) => setForm((c) => ({ ...c, progressNote: v }))} /></Field>
         <button type="submit"><Save size={18} />Save note</button>
         {message && <p className="success">{message}</p>}
         {error && <p className="error">{error}</p>}
@@ -2131,6 +2336,7 @@ export function AssignBedPage() {
 
 export function IpdPatientDetailsPage({ user }) {
   const admissions = useApi("/ipd/admissions");
+  const [vitals, setVitals] = useState([]);
   const rows = admissions.data.filter((a) => user.role === "Nurse" || !user.doctorId || a.AttendingDoctorID === user.doctorId);
   const [selectedId, setSelectedId] = useState("");
   const selected = rows.find((item) => String(item.AdmissionID) === String(selectedId)) || rows[0];
@@ -2139,6 +2345,23 @@ export function IpdPatientDetailsPage({ user }) {
       setSelectedId(String(rows[0].AdmissionID));
     }
   }, [rows, selectedId]);
+  useEffect(() => {
+    let cancelled = false;
+    async function loadVitals() {
+      if (!selected?.AdmissionID) {
+        setVitals([]);
+        return;
+      }
+      try {
+        const response = await api.get(`/ipd/admissions/${selected.AdmissionID}/vitals`);
+        if (!cancelled) setVitals(response.data || []);
+      } catch (_err) {
+        if (!cancelled) setVitals([]);
+      }
+    }
+    loadVitals();
+    return () => { cancelled = true; };
+  }, [selected?.AdmissionID]);
   return (
     <>
       <PageHeader eyebrow={user.role} title="IPD Patient Details" icon={BedDouble} />
@@ -2165,6 +2388,23 @@ export function IpdPatientDetailsPage({ user }) {
               <div><dt>Diagnosis</dt><dd>{selected.ClinicalDiagnosis || "No diagnosis recorded."}</dd></div>
             </dl>
           )}
+        </article>
+        <article className="data-panel wide-panel">
+          <header><div><Activity size={20} /><h2>Vital History</h2></div><span>{vitals.length}</span></header>
+          <DataTable
+            rows={vitals}
+            empty="No vitals recorded yet."
+            columns={[
+              { key: "RecordedAt", label: "Recorded At", render: (row) => row.RecordedAt ? new Date(row.RecordedAt).toLocaleString() : "-" },
+              { key: "NurseName", label: "Nurse" },
+              { key: "TemperatureC", label: "Temp (C)" },
+              { key: "HeartRate", label: "HR" },
+              { key: "RespiratoryRate", label: "RR" },
+              { key: "OxygenSaturation", label: "SpO2" },
+              { key: "BP", label: "BP", render: (row) => (row.SystolicBP && row.DiastolicBP) ? `${row.SystolicBP}/${row.DiastolicBP}` : "-" },
+              { key: "ProgressNote", label: "Progress note", render: (row) => row.ProgressNote || "-" }
+            ]}
+          />
         </article>
       </section>
     </>

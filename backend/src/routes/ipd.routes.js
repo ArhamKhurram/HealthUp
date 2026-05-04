@@ -15,13 +15,17 @@ const {
   getPrescriptionMedication,
   createPrescriptionMedication,
   updatePrescriptionMedication,
-  deletePrescriptionMedication
+  deletePrescriptionMedication,
+  listVitalsByAdmission,
+  createVitalForAdmission
 } = require("../controllers/ipd.controller");
 const { requireAuth, requireRole } = require("../middleware/auth");
 
 router.use(requireAuth);
 router.get("/admissions", requireRole("Admin", "Doctor", "Nurse", "Receptionist", "Patient"), listAdmissions);
 router.get("/admissions/:id", requireRole("Admin", "Doctor", "Nurse", "Receptionist", "Patient"), getAdmission);
+router.get("/admissions/:id/vitals", requireRole("Admin", "Doctor", "Nurse", "Receptionist", "Patient"), listVitalsByAdmission);
+router.post("/admissions/:id/vitals", requireRole("Nurse"), createVitalForAdmission);
 router.post("/admissions", requireRole("Admin", "Doctor", "Nurse", "Receptionist"), createAdmission);
 router.put("/admissions/:id", requireRole("Admin", "Doctor", "Nurse", "Receptionist"), updateAdmission);
 router.delete("/admissions/:id", requireRole("Admin"), deleteAdmission);

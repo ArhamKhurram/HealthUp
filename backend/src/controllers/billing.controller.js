@@ -3,27 +3,6 @@
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
 
-function paymentSelect(kind, whereClause = "") {
-  const sourceJoin = kind === "OPD"
-    ? "LEFT JOIN OPDAppointments a ON a.AppointmentID = pay.AppointmentID"
-    : "LEFT JOIN IPDAdmissions a ON a.AdmissionID = pay.AdmissionID";
-  const sourceColumn = kind === "OPD" ? "pay.AppointmentID" : "pay.AdmissionID";
-
-  return `
-    SELECT pay.PaymentID, pay.PatientID, ${sourceColumn} AS ${kind === "OPD" ? "AppointmentID" : "AdmissionID"},
-           pay.TotalAmount, pay.PaidAmount, pay.Status, pay.PaymentMethod, pay.ReferenceNo,
-           pay.ReceivedByUserID, pay.PaidAt, pay.CreatedAt,
-           pu.FullName AS PatientName,
-           ru.FullName AS ReceivedByName
-    FROM Payments pay
-    INNER JOIN Patients p ON p.PatientID = pay.PatientID
-    INNER JOIN Users pu ON pu.UserID = p.UserID
-    ${sourceJoin}
-    LEFT JOIN Users ru ON ru.UserID = pay.ReceivedByUserID
-    ${whereClause}
-  `;
-}
-
 async function createPayment(req, res, kind) {
   const pool = await getPool();
   const sourceField = kind === "OPD" ? "appointmentId" : "admissionId";
@@ -44,9 +23,10 @@ async function createPayment(req, res, kind) {
       .input("ReferenceNo", sql.NVarChar(80), referenceNo || null)
       .input("ReceivedByUserID", sql.Int, req.user?.userId || null)
       .query(`
-        INSERT INTO Payments (PatientID, ${sourceColumn}, TotalAmount, PaidAmount, Status, PaymentMethod, ReferenceNo, ReceivedByUserID, PaidAt)
-        OUTPUT INSERTED.*
-        VALUES (@PatientID, @${sourceColumn}, @TotalAmount, @PaidAmount, @Status, @PaymentMethod, @ReferenceNo, @ReceivedByUserID, SYSDATETIME())
+        EXEC sp_RecordPayment
+          @PatientID,
+          ${kind === "OPD" ? `@${sourceColumn}, NULL` : `NULL, @${sourceColumn}`},
+          @TotalAmount, @PaidAmount, @Status, @PaymentMethod, @ReferenceNo, @ReceivedByUserID
       `);
 
     const paymentId = inserted.recordset[0].PaymentID;
@@ -116,7 +96,7 @@ async function deletePayment(req, res, sourceColumn) {
 
 const listOPDPayments = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool.request().query(`${paymentSelect("OPD", "WHERE pay.AppointmentID IS NOT NULL")} ORDER BY pay.CreatedAt DESC`);
+  const result = await pool.request().query("SELECT * FROM vw_PaymentSummary WHERE AppointmentID IS NOT NULL ORDER BY CreatedAt DESC");
   res.json(result.recordset);
 });
 
@@ -124,7 +104,7 @@ const getOPDPayment = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const result = await pool.request()
     .input("PaymentID", sql.Int, req.params.id)
-    .query(`${paymentSelect("OPD", "WHERE pay.PaymentID = @PaymentID AND pay.AppointmentID IS NOT NULL")}`);
+    .query("SELECT * FROM vw_PaymentSummary WHERE PaymentID = @PaymentID AND AppointmentID IS NOT NULL");
   if (!result.recordset[0]) return res.status(404).json({ message: "Payment not found" });
   res.json(result.recordset[0]);
 });
@@ -135,7 +115,7 @@ const deleteOPDPayment = asyncHandler((req, res) => deletePayment(req, res, "App
 
 const listIPDPayments = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool.request().query(`${paymentSelect("IPD", "WHERE pay.AdmissionID IS NOT NULL")} ORDER BY pay.CreatedAt DESC`);
+  const result = await pool.request().query("SELECT * FROM vw_PaymentSummary WHERE AdmissionID IS NOT NULL ORDER BY CreatedAt DESC");
   res.json(result.recordset);
 });
 
@@ -143,7 +123,7 @@ const getIPDPayment = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const result = await pool.request()
     .input("PaymentID", sql.Int, req.params.id)
-    .query(`${paymentSelect("IPD", "WHERE pay.PaymentID = @PaymentID AND pay.AdmissionID IS NOT NULL")}`);
+    .query("SELECT * FROM vw_PaymentSummary WHERE PaymentID = @PaymentID AND AdmissionID IS NOT NULL");
   if (!result.recordset[0]) return res.status(404).json({ message: "Payment not found" });
   res.json(result.recordset[0]);
 });

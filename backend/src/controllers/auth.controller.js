@@ -118,15 +118,7 @@ const login = asyncHandler(async (req, res) => {
   const result = await pool
     .request()
     .input("Email", sql.NVarChar(150), email)
-    .query(`
-      SELECT u.UserID, u.FullName, u.Email, u.Password, u.Role, u.Phone, u.Address, u.IsActive,
-             p.PatientID, d.DoctorID, n.NurseID
-      FROM Users u
-      LEFT JOIN Patients p ON p.UserID = u.UserID
-      LEFT JOIN Doctors d ON d.UserID = u.UserID
-      LEFT JOIN Nurses n ON n.UserID = u.UserID
-      WHERE u.Email = @Email
-    `);
+    .query("EXEC sp_LoginUser @Email");
 
   const user = result.recordset[0];
 
@@ -171,32 +163,14 @@ const registerPatient = asyncHandler(async (req, res) => {
 
   const hash = await bcrypt.hash(sanitized.password, 10);
   const pool = await getPool();
-  const transaction = new sql.Transaction(pool);
-
-  await transaction.begin();
-
   try {
-    const userResult = await new sql.Request(transaction)
+    const userResult = await pool.request()
       .input("FullName", sql.NVarChar(120), sanitized.fullName)
       .input("Email", sql.NVarChar(150), sanitized.email)
       .input("Password", sql.NVarChar(255), hash)
       .input("Phone", sql.NVarChar(30), sanitized.phone)
       .input("Address", sql.NVarChar(255), sanitized.address)
-      .query(`
-        INSERT INTO Users (FullName, Email, Password, Role, Phone, Address)
-        OUTPUT INSERTED.UserID, INSERTED.FullName, INSERTED.Email, INSERTED.Role, INSERTED.Phone, INSERTED.Address
-        VALUES (@FullName, @Email, @Password, 'Patient', @Phone, @Address)
-      `);
-    const user = userResult.recordset[0];
-    if (!user?.UserID) {
-      throw new Error("Unable to create user record");
-    }
-
-    const generatedMrNumber = sanitized.mrNumber || `MR-${String(user.UserID).padStart(4, "0")}`;
-
-    const patientResult = await new sql.Request(transaction)
-      .input("UserID", sql.Int, user.UserID)
-      .input("MRNumber", sql.NVarChar(50), generatedMrNumber)
+      .input("MRNumber", sql.NVarChar(50), sanitized.mrNumber || "TEMP")
       .input("DateOfBirth", sql.Date, sanitized.dateOfBirth)
       .input("Gender", sql.NVarChar(20), sanitized.gender)
       .input("BloodGroup", sql.NVarChar(10), sanitized.bloodGroup)
@@ -204,20 +178,19 @@ const registerPatient = asyncHandler(async (req, res) => {
       .input("Allergies", sql.NVarChar(sql.MAX), sanitized.allergies)
       .input("ChronicConditions", sql.NVarChar(sql.MAX), sanitized.chronicConditions)
       .query(`
-        INSERT INTO Patients
-          (UserID, MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions)
-        OUTPUT INSERTED.PatientID, INSERTED.MRNumber
-        VALUES
-          (@UserID, @MRNumber, @DateOfBirth, @Gender, @BloodGroup, @EmergencyContact, @Allergies, @ChronicConditions)
+        DECLARE @MR NVARCHAR(50) = CASE WHEN @MRNumber='TEMP' THEN CONCAT('MR-', RIGHT(CONCAT('0000', (SELECT ISNULL(MAX(UserID),0)+1 FROM Users)), 4)) ELSE @MRNumber END;
+        EXEC sp_RegisterPatient
+          @FullName, @Email, @Password, @Phone, @Address, @MR, @DateOfBirth, @Gender,
+          @BloodGroup, @EmergencyContact, @Allergies, @ChronicConditions
       `);
+    const user = userResult.recordset[0];
+    if (!user?.UserID) throw new Error("Unable to create user record");
 
     const token = jwt.sign(
       { userId: user.UserID, role: user.Role, email: user.Email },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || "1d" }
     );
-
-    await transaction.commit();
 
     res.status(201).json({
       token,
@@ -226,12 +199,11 @@ const registerPatient = asyncHandler(async (req, res) => {
         fullName: user.FullName,
         email: user.Email,
         role: user.Role,
-        patientId: patientResult.recordset[0].PatientID,
-        mrNumber: patientResult.recordset[0].MRNumber
+        patientId: user.PatientID,
+        mrNumber: user.MRNumber
       }
     });
   } catch (error) {
-    await transaction.rollback();
     if (error?.number === 2627 || error?.number === 2601) {
       const duplicateTarget = /MRNumber/i.test(error.originalError?.info?.message || error.message) ? "mrNumber" : "email";
       return res.status(409).json({

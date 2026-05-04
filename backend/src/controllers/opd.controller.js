@@ -218,37 +218,127 @@ const updateAppointment = asyncHandler(async (req, res) => {
   const { patientId, doctorId, appointmentDate, appointmentDateTime, appointmentType, status, chiefComplaint } = req.body;
   const selectedDate = appointmentDateTime || appointmentDate;
   const nextStatus = status || "Pending";
-  if (!["Pending", "Confirmed", "Completed"].includes(nextStatus)) return res.status(400).json({ message: "Invalid appointment status" });
+
+  // Validate status value
+  if (!["Pending", "Confirmed", "Completed"].includes(nextStatus)) {
+    return res.status(400).json({ message: "Invalid appointment status" });
+  }
 
   const pool = await getPool();
   const existing = await pool.request()
     .input("AppointmentID", sql.Int, req.params.id)
     .query("SELECT * FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
-  if (!existing.recordset[0]) return res.status(404).json({ message: "Appointment not found" });
 
-  const mergedDoctorId = doctorId || existing.recordset[0].DoctorID;
-  const mergedDate = selectedDate || existing.recordset[0].AppointmentDateTime;
-  await assertSlotAvailable(pool, mergedDoctorId, mergedDate, Number(req.params.id));
+  if (!existing.recordset[0]) {
+    return res.status(404).json({ message: "Appointment not found" });
+  }
 
+  const current = existing.recordset[0];
+
+  // ============================================================
+  // ROLE-BASED FIELD VALIDATION
+  // ============================================================
+  // Admin  — unrestricted; can modify all fields
+  // Doctor — can ONLY set Status = 'Completed' (with completion notes via chiefComplaint)
+  // Receptionist — can modify schedule/rescheduling fields; NOT status or clinical data
+  // Nurse — NO access (removed from route requireRole)
+  // ============================================================
+
+  const role = req.user?.role;
+
+  // Build UPDATE parameters dynamically based on role permissions
+  const updateFields = [];
+  const params = { AppointmentID: req.params.id };
+
+  // —— Always present ——
+  params.PatientID = sql.Int, params.DoctorID = sql.Int, params.AppointmentDateTime = sql.DateTime2;
+  params.AppointmentType = sql.NVarChar(50), params.Status = sql.NVarChar(30);
+  params.ChiefComplaint = sql.NVarChar(sql.MAX);
+
+  // Determine which fields each role may change
+  let allowedFields = {
+    patientId: false,
+    doctorId: false,
+    appointmentDateTime: false,
+    appointmentType: false,
+    chiefComplaint: false
+  };
+
+  if (role === "Admin") {
+    // Admins: full edit
+    allowedFields = { patientId: true, doctorId: true, appointmentDateTime: true, appointmentType: true, chiefComplaint: true };
+  } else if (role === "Receptionist") {
+    // Receptionists: rescheduling + reassignment
+    allowedFields = { patientId: true, doctorId: true, appointmentDateTime: true, appointmentType: true, chiefComplaint: true };
+    // Receptionists cannot manually set status to 'Completed'; they can only Pending/Confirmed
+    if (nextStatus === "Completed") {
+      return res.status(403).json({ message: "Only a doctor can mark an appointment as Completed" });
+    }
+  } else if (role === "Doctor") {
+    // Doctors: can ONLY set status to 'Completed' on their own appointments; otherwise read-only
+    if (nextStatus !== "Completed") {
+      return res.status(403).json({ message: "Doctors can only mark appointments as Completed" });
+    }
+    // Verify this doctor owns the appointment
+    if (current.DoctorID !== actor.doctorId) {
+      return res.status(403).json({ message: "You can only update your own appointments" });
+    }
+    // If doctor included other fields, reject (status only)
+    const attemptedFieldChanges = [
+      patientId, doctorId, appointmentDate, appointmentDateTime, appointmentType, chiefComplaint
+    ].some(v => v !== undefined && v !== "");
+    if (attemptedFieldChanges) {
+      return res.status(403).json({ message: "Doctors can only update appointment status to Completed (no other fields)" });
+    }
+    // Doctors allowed: status change only; chiefComplaint may be omitted (kept as is) or provided for completion notes
+    allowedFields = { chiefComplaint: true };
+  }
+
+  // Apply defaults for fields (respecting role-based previous logic)
+  const mergedPatientId   = patientId   !== undefined && patientId !== ""   ? Number(patientId)   : current.PatientID;
+  const mergedDoctorId    = doctorId    !== undefined && doctorId !== ""    ? Number(doctorId)    : current.DoctorID;
+  const mergedDateTime    = selectedDate !== undefined && selectedDate !== "" ? new Date(selectedDate) : current.AppointmentDateTime;
+  const mergedType        = appointmentType !== undefined && appointmentType !== "" ? appointmentType : current.AppointmentType;
+  const mergedChief       = chiefComplaint !== undefined ? (chiefComplaint || null) : current.ChiefComplaint;
+
+  // If changing doctor or datetime, check slot availability (ensures no double-booking)
+  if (mergedDoctorId !== current.DoctorID || mergedDateTime.getTime() !== new Date(current.AppointmentDateTime).getTime()) {
+    await assertSlotAvailable(pool, mergedDoctorId, mergedDateTime, Number(req.params.id));
+  }
+
+  // Final status value to write (already validated)
+  const finalStatus = nextStatus;
+
+  // Construct parameterised UPDATE query dynamically — we include ChiefComplaint ONLY if role permits it
+  let updateQuery = `
+    UPDATE OPDAppointments
+    SET
+      PatientID = @PatientID,
+      DoctorID = @DoctorID,
+      AppointmentDateTime = @AppointmentDateTime,
+      AppointmentType = @AppointmentType,
+      Status = @Status
+  `;
+
+  if (allowedFields.chiefComplaint || role === "Admin") {
+    updateQuery += `, ChiefComplaint = @ChiefComplaint`;
+  }
+
+  updateQuery += `
+    OUTPUT INSERTED.*, INSERTED.AppointmentDateTime AS AppointmentDate
+    WHERE AppointmentID = @AppointmentID
+  `;
+
+  // Execute UPDATE in a single atomic statement (SQL Server runs each statement in an implicit transaction)
   const result = await pool.request()
     .input("AppointmentID", sql.Int, req.params.id)
-    .input("PatientID", sql.Int, patientId || existing.recordset[0].PatientID)
+    .input("PatientID", sql.Int, mergedPatientId)
     .input("DoctorID", sql.Int, mergedDoctorId)
-    .input("AppointmentDateTime", sql.DateTime2, new Date(mergedDate))
-    .input("AppointmentType", sql.NVarChar(50), appointmentType || existing.recordset[0].AppointmentType)
-    .input("Status", sql.NVarChar(30), nextStatus)
-    .input("ChiefComplaint", sql.NVarChar(sql.MAX), chiefComplaint ?? existing.recordset[0].ChiefComplaint)
-    .query(`
-      UPDATE OPDAppointments
-      SET PatientID = @PatientID,
-          DoctorID = @DoctorID,
-          AppointmentDateTime = @AppointmentDateTime,
-          AppointmentType = @AppointmentType,
-          Status = @Status,
-          ChiefComplaint = @ChiefComplaint
-      OUTPUT INSERTED.*, INSERTED.AppointmentDateTime AS AppointmentDate
-      WHERE AppointmentID = @AppointmentID
-    `);
+    .input("AppointmentDateTime", sql.DateTime2, mergedDateTime)
+    .input("AppointmentType", sql.NVarChar(50), mergedType)
+    .input("Status", sql.NVarChar(30), finalStatus)
+    .input("ChiefComplaint", sql.NVarChar(sql.MAX), mergedChief)
+    .query(updateQuery);
 
   res.json(result.recordset[0]);
 });

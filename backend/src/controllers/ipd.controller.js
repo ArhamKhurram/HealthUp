@@ -3,30 +3,6 @@
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
 
-function admissionSelect(whereClause = "") {
-  return `
-    SELECT a.AdmissionID, a.PatientID, a.DoctorID, a.DepartmentID,
-           a.AdmissionDate, a.DischargeDate, a.Status, a.BedNumber, a.Diagnosis,
-           a.DoctorID AS AttendingDoctorID,
-           a.DepartmentID AS WardID,
-           CAST(NULL AS int) AS BedID,
-           'General' AS AdmissionType,
-           a.Diagnosis AS ClinicalDiagnosis,
-           p.MRNumber,
-           pu.FullName AS PatientName,
-           du.FullName AS DoctorName,
-           dep.DepartmentName,
-           dep.DepartmentName AS WardName
-    FROM IPDAdmissions a
-    INNER JOIN Patients p ON p.PatientID = a.PatientID
-    INNER JOIN Users pu ON pu.UserID = p.UserID
-    INNER JOIN Doctors d ON d.DoctorID = a.DoctorID
-    INNER JOIN Users du ON du.UserID = d.UserID
-    INNER JOIN Departments dep ON dep.DepartmentID = a.DepartmentID
-    ${whereClause}
-  `;
-}
-
 async function actorContext(pool, req) {
   if (req.user?.role === "Patient") {
     const patient = await pool.request()
@@ -60,18 +36,10 @@ function normalizeAdmissionBody(body) {
 const listAdmissions = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const actor = await actorContext(pool, req);
-  const request = pool.request();
-  let whereClause = "";
-
-  if (req.user.role === "Patient") {
-    request.input("PatientID", sql.Int, actor.patientId);
-    whereClause = "WHERE a.PatientID = @PatientID";
-  } else if (req.user.role === "Doctor") {
-    request.input("DoctorID", sql.Int, actor.doctorId);
-    whereClause = "WHERE a.DoctorID = @DoctorID";
-  }
-
-  const result = await request.query(`${admissionSelect(whereClause)} ORDER BY a.AdmissionDate DESC`);
+  const result = await pool.request()
+    .input("PatientID", sql.Int, req.user.role === "Patient" ? actor.patientId : null)
+    .input("DoctorID", sql.Int, req.user.role === "Doctor" ? actor.doctorId : null)
+    .query("EXEC sp_ListIPDAdmissions @PatientID, @DoctorID");
   res.json(result.recordset);
 });
 
@@ -79,7 +47,7 @@ const getAdmission = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const result = await pool.request()
     .input("AdmissionID", sql.Int, req.params.id)
-    .query(`${admissionSelect("WHERE a.AdmissionID = @AdmissionID")}`);
+    .query("SELECT * FROM vw_IPDAdmissionDetails WHERE AdmissionID = @AdmissionID");
   if (!result.recordset[0]) return res.status(404).json({ message: "Admission not found" });
   res.json(result.recordset[0]);
 });
@@ -97,11 +65,7 @@ const createAdmission = asyncHandler(async (req, res) => {
     .input("DepartmentID", sql.Int, body.departmentId)
     .input("BedNumber", sql.NVarChar(30), body.bedNumber)
     .input("Diagnosis", sql.NVarChar(sql.MAX), body.diagnosis)
-    .query(`
-      INSERT INTO IPDAdmissions (PatientID, DoctorID, DepartmentID, BedNumber, Diagnosis, Status)
-      OUTPUT INSERTED.*
-      VALUES (@PatientID, @DoctorID, @DepartmentID, @BedNumber, @Diagnosis, 'Admitted')
-    `);
+    .query("EXEC sp_CreateIPDAdmission @PatientID, @DoctorID, @DepartmentID, @BedNumber, @Diagnosis");
   res.status(201).json(result.recordset[0]);
 });
 
@@ -112,7 +76,7 @@ const updateAdmission = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const existing = await pool.request()
     .input("AdmissionID", sql.Int, req.params.id)
-    .query("SELECT * FROM IPDAdmissions WHERE AdmissionID = @AdmissionID");
+    .query("SELECT * FROM vw_IPDAdmissionDetails WHERE AdmissionID = @AdmissionID");
   if (!existing.recordset[0]) return res.status(404).json({ message: "Admission not found" });
 
   const previous = existing.recordset[0];
@@ -125,18 +89,7 @@ const updateAdmission = asyncHandler(async (req, res) => {
     .input("Diagnosis", sql.NVarChar(sql.MAX), body.diagnosis ?? previous.Diagnosis)
     .input("Status", sql.NVarChar(30), body.status || previous.Status)
     .input("DischargeDate", sql.DateTime2, body.dischargeDate ? new Date(body.dischargeDate) : previous.DischargeDate)
-    .query(`
-      UPDATE IPDAdmissions
-      SET PatientID = @PatientID,
-          DoctorID = @DoctorID,
-          DepartmentID = @DepartmentID,
-          BedNumber = @BedNumber,
-          Diagnosis = @Diagnosis,
-          Status = @Status,
-          DischargeDate = CASE WHEN @Status = 'Discharged' THEN COALESCE(@DischargeDate, SYSDATETIME()) ELSE @DischargeDate END
-      OUTPUT INSERTED.*
-      WHERE AdmissionID = @AdmissionID
-    `);
+    .query("EXEC sp_UpdateIPDAdmission @AdmissionID, @PatientID, @DoctorID, @DepartmentID, @BedNumber, @Diagnosis, @Status, @DischargeDate");
   res.json(result.recordset[0]);
 });
 
@@ -304,6 +257,52 @@ const deletePrescriptionMedication = asyncHandler(async (req, res) => {
   res.json({ message: "Prescription medication deleted" });
 });
 
+const listVitalsByAdmission = asyncHandler(async (req, res) => {
+  const pool = await getPool();
+  const result = await pool.request()
+    .input("AdmissionID", sql.Int, req.params.id)
+    .query("EXEC sp_GetPatientVitalHistory @AdmissionID");
+  res.json(result.recordset);
+});
+
+const createVitalForAdmission = asyncHandler(async (req, res) => {
+  const pool = await getPool();
+  const nurse = await pool.request()
+    .input("UserID", sql.Int, req.user.userId)
+    .query("SELECT NurseID FROM Nurses WHERE UserID = @UserID");
+
+  const nurseId = nurse.recordset[0]?.NurseID;
+  if (!nurseId) {
+    return res.status(403).json({ message: "Only nurse profiles can record vitals." });
+  }
+
+  const body = req.body || {};
+  const result = await pool.request()
+    .input("AdmissionID", sql.Int, req.params.id)
+    .input("NurseID", sql.Int, nurseId)
+    .input("TemperatureC", sql.Decimal(4, 1), body.temperatureC ?? null)
+    .input("SystolicBP", sql.Int, body.systolicBP ?? null)
+    .input("DiastolicBP", sql.Int, body.diastolicBP ?? null)
+    .input("HeartRate", sql.Int, body.heartRate ?? null)
+    .input("RespiratoryRate", sql.Int, body.respiratoryRate ?? null)
+    .input("OxygenSaturation", sql.Int, body.oxygenSaturation ?? null)
+    .input("ProgressNote", sql.NVarChar(sql.MAX), body.progressNote ?? null)
+    .query(`
+      EXEC sp_RecordPatientVital
+        @AdmissionID,
+        @NurseID,
+        @TemperatureC,
+        @SystolicBP,
+        @DiastolicBP,
+        @HeartRate,
+        @RespiratoryRate,
+        @OxygenSaturation,
+        @ProgressNote
+    `);
+
+  res.status(201).json(result.recordset[0]);
+});
+
 module.exports = {
   listAdmissions,
   getAdmission,
@@ -319,5 +318,7 @@ module.exports = {
   getPrescriptionMedication,
   createPrescriptionMedication,
   updatePrescriptionMedication,
-  deletePrescriptionMedication
+  deletePrescriptionMedication,
+  listVitalsByAdmission,
+  createVitalForAdmission
 };
