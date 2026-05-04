@@ -1,5 +1,49 @@
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
+const PAYMENT_STATUSES = ["Pending", "Paid", "Rejected"];
+const APPOINTMENT_STATUSES = ["Pending", "PendingPayment", "Confirmed", "CheckedIn", "Completed", "Cancelled"];
+
+const derivePaymentStatus = (status, paidAmount, totalAmount) => {
+  if (status && !PAYMENT_STATUSES.includes(status)) return { ok: false };
+  if (status) return { ok: true, status };
+  return { ok: true, status: Number(paidAmount || 0) >= Number(totalAmount || 0) ? "Paid" : "Pending" };
+};
+
+const syncAppointmentStatusFromPayment = async ({ pool, appointmentId, paymentStatus, paidAmount, totalAmount }) => {
+  const appointmentResult = await pool
+    .request()
+    .input("AppointmentID", sql.Int, appointmentId)
+    .query("SELECT AppointmentID, Status FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
+  const appointment = appointmentResult.recordset[0];
+  if (!appointment) return { ok: false, code: 404, message: "Appointment not found" };
+  if (["Completed", "Cancelled"].includes(appointment.Status)) {
+    return { ok: false, code: 409, message: `Cannot update payment for ${appointment.Status.toLowerCase()} appointment` };
+  }
+  if (!APPOINTMENT_STATUSES.includes(appointment.Status)) {
+    return { ok: false, code: 409, message: "Appointment status is invalid for payment progression" };
+  }
+
+  let nextAppointmentStatus = appointment.Status;
+  if (paymentStatus === "Paid" && Number(paidAmount || 0) >= Number(totalAmount || 0)) {
+    if (appointment.Status === "Pending" || appointment.Status === "PendingPayment") {
+      nextAppointmentStatus = "Confirmed";
+    }
+  } else if (paymentStatus === "Pending" || paymentStatus === "Rejected") {
+    if (appointment.Status === "Pending" || appointment.Status === "Confirmed" || appointment.Status === "PendingPayment") {
+      nextAppointmentStatus = "PendingPayment";
+    }
+  }
+
+  if (nextAppointmentStatus !== appointment.Status) {
+    await pool
+      .request()
+      .input("AppointmentID", sql.Int, appointmentId)
+      .input("Status", sql.NVarChar(30), nextAppointmentStatus)
+      .query("UPDATE OPDAppointments SET Status = @Status WHERE AppointmentID = @AppointmentID");
+  }
+
+  return { ok: true };
+};
 
 const getActorPatientId = async (pool, userId) => {
   const result = await pool
@@ -82,12 +126,15 @@ const createOPDPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Payment patient must match appointment patient" });
   }
 
+  const normalizedPaid = Number(paidAmount || 0);
+  const normalizedTotal = Number(totalAmount || 0);
+  const statusResolution = derivePaymentStatus(null, normalizedPaid, normalizedTotal);
   const created = await pool
     .request()
     .input("AppointmentID", sql.Int, appointmentId)
     .input("PatientID", sql.Int, patientId)
-    .input("TotalAmount", sql.Decimal(10, 2), totalAmount || 0)
-    .input("PaidAmount", sql.Decimal(10, 2), paidAmount || 0)
+    .input("TotalAmount", sql.Decimal(10, 2), normalizedTotal)
+    .input("PaidAmount", sql.Decimal(10, 2), normalizedPaid)
     .input("ItemType1", sql.NVarChar(80), first.itemType)
     .input("Amount1", sql.Decimal(10, 2), first.amount)
     .input("Quantity1", sql.Int, first.quantity || 1)
@@ -109,6 +156,16 @@ const createOPDPayment = asyncHandler(async (req, res) => {
     `);
 
   const paymentId = created.recordset[0]?.PaymentID;
+  const appointmentSync = await syncAppointmentStatusFromPayment({
+    pool,
+    appointmentId,
+    paymentStatus: statusResolution.status,
+    paidAmount: normalizedPaid,
+    totalAmount: normalizedTotal
+  });
+  if (!appointmentSync.ok) {
+    return res.status(appointmentSync.code).json({ message: appointmentSync.message });
+  }
   const result = await pool
     .request()
     .input("PaymentID", sql.Int, paymentId)
@@ -119,20 +176,46 @@ const createOPDPayment = asyncHandler(async (req, res) => {
 
 const updateOPDPayment = asyncHandler(async (req, res) => {
   const { appointmentId, patientId, totalAmount, paidAmount, status } = req.body;
-
-  if (!appointmentId || !patientId) {
-    return res.status(400).json({ message: "Appointment and patient are required" });
+  const pool = await getPool();
+  const existingResult = await pool
+    .request()
+    .input("PaymentID", sql.Int, req.params.id)
+    .query("SELECT * FROM OPDPayments WHERE PaymentID = @PaymentID");
+  const existing = existingResult.recordset[0];
+  if (!existing) {
+    return res.status(404).json({ message: "OPD payment not found" });
   }
 
-  const pool = await getPool();
+  const nextAppointmentId = appointmentId || existing.AppointmentID;
+  const nextPatientId = patientId || existing.PatientID;
+  const nextTotalAmount = totalAmount !== undefined ? Number(totalAmount) : Number(existing.TotalAmount);
+  const nextPaidAmount = paidAmount !== undefined ? Number(paidAmount) : Number(existing.PaidAmount);
+  if (!nextAppointmentId || !nextPatientId) {
+    return res.status(400).json({ message: "Appointment and patient are required" });
+  }
+  const statusResolution = derivePaymentStatus(status, nextPaidAmount, nextTotalAmount);
+  if (!statusResolution.ok) {
+    return res.status(400).json({ message: "Invalid payment status" });
+  }
+
+  const appointmentCheck = await pool
+    .request()
+    .input("AppointmentID", sql.Int, nextAppointmentId)
+    .query("SELECT AppointmentID, PatientID FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
+  const appointment = appointmentCheck.recordset[0];
+  if (!appointment) return res.status(404).json({ message: "Appointment not found" });
+  if (Number(appointment.PatientID) !== Number(nextPatientId)) {
+    return res.status(400).json({ message: "Payment patient must match appointment patient" });
+  }
+
   const result = await pool
     .request()
     .input("PaymentID", sql.Int, req.params.id)
-    .input("AppointmentID", sql.Int, appointmentId)
-    .input("PatientID", sql.Int, patientId)
-    .input("TotalAmount", sql.Decimal(10, 2), totalAmount || 0)
-    .input("PaidAmount", sql.Decimal(10, 2), paidAmount || 0)
-    .input("Status", sql.NVarChar(30), status || "Pending")
+    .input("AppointmentID", sql.Int, nextAppointmentId)
+    .input("PatientID", sql.Int, nextPatientId)
+    .input("TotalAmount", sql.Decimal(10, 2), nextTotalAmount)
+    .input("PaidAmount", sql.Decimal(10, 2), nextPaidAmount)
+    .input("Status", sql.NVarChar(30), statusResolution.status)
     .query(`
       UPDATE OPDPayments
       SET AppointmentID = @AppointmentID,
@@ -144,8 +227,20 @@ const updateOPDPayment = asyncHandler(async (req, res) => {
       WHERE PaymentID = @PaymentID
     `);
 
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "OPD payment not found" });
+  const latestPayment = await pool
+    .request()
+    .input("PaymentID", sql.Int, req.params.id)
+    .query("SELECT PaymentID, AppointmentID, TotalAmount, PaidAmount, Status FROM OPDPayments WHERE PaymentID = @PaymentID");
+  const savedPayment = latestPayment.recordset[0];
+  const appointmentSync = await syncAppointmentStatusFromPayment({
+    pool,
+    appointmentId: savedPayment.AppointmentID,
+    paymentStatus: savedPayment.Status,
+    paidAmount: Number(savedPayment.PaidAmount),
+    totalAmount: Number(savedPayment.TotalAmount)
+  });
+  if (!appointmentSync.ok) {
+    return res.status(appointmentSync.code).json({ message: appointmentSync.message });
   }
 
   res.json(result.recordset[0]);
@@ -284,6 +379,10 @@ const updateIPDPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Admission and patient are required" });
   }
 
+  if (status && !PAYMENT_STATUSES.includes(status)) {
+    return res.status(400).json({ message: "Invalid payment status" });
+  }
+  const normalizedStatus = status || (Number(paidAmount || 0) >= Number(totalAmount || 0) ? "Paid" : "Pending");
   const pool = await getPool();
   const result = await pool
     .request()
@@ -292,7 +391,7 @@ const updateIPDPayment = asyncHandler(async (req, res) => {
     .input("PatientID", sql.Int, patientId)
     .input("TotalAmount", sql.Decimal(10, 2), totalAmount || 0)
     .input("PaidAmount", sql.Decimal(10, 2), paidAmount || 0)
-    .input("Status", sql.NVarChar(30), status || "Pending")
+    .input("Status", sql.NVarChar(30), normalizedStatus)
     .query(`
       UPDATE IPDPayments
       SET AdmissionID = @AdmissionID,

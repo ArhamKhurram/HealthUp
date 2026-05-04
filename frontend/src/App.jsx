@@ -20,8 +20,7 @@ import {
   EquipmentManagement,
   IpdPatientDetailsPage,
   IpdPatients,
-  ManageDoctors,
-  ManagePatients,
+  ManageUsersPage,
   MyAdmissions,
   MyAppointments,
   MyPrescriptions,
@@ -88,12 +87,8 @@ function App() {
     switch (currentRoute.view) {
       case "adminDashboard":
         return <AdminDashboard />;
-      case "managePatients":
-        return <ManagePatients />;
-      case "manageDoctors":
-        return <ManageDoctors />;
-      case "manageNurses":
-        return <DutyRosterManagement />;
+      case "manageUsers":
+        return <ManageUsersPage />;
       case "departments":
         return <DepartmentsManagement />;
       case "wardsBeds":

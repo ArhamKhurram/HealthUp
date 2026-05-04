@@ -8,11 +8,11 @@ IF NOT EXISTS (SELECT 1 FROM Users WHERE Email = 'admin@healthup.test')
 BEGIN
     INSERT INTO Users (FullName, Email, Password, Role, Phone, Address)
     VALUES
-        ('System Admin', 'admin@healthup.test', @PasswordHash, 'Admin', '0300-0000000', 'HealthUp Admin Office'),
-        ('Sara Khan', 'patient@healthup.test', @PasswordHash, 'Patient', '0301-1111111', 'Lahore'),
-        ('Dr. Ahmed Raza', 'doctor@healthup.test', @PasswordHash, 'Doctor', '0302-2222222', 'Lahore'),
-        ('Nurse Fatima Noor', 'nurse@healthup.test', @PasswordHash, 'Nurse', '0303-3333333', 'Lahore'),
-        ('Ali Hassan', 'reception@healthup.test', @PasswordHash, 'Receptionist', '0305-5555555', 'Front Desk');
+        ('System Admin', 'admin@healthup.test', @PasswordHash, 'Admin', '03000000000', 'HealthUp Admin Office'),
+        ('Sara Khan', 'patient@healthup.test', @PasswordHash, 'Patient', '03011111111', 'Lahore'),
+        ('Dr. Ahmed Raza', 'doctor@healthup.test', @PasswordHash, 'Doctor', '03022222222', 'Lahore'),
+        ('Nurse Fatima Noor', 'nurse@healthup.test', @PasswordHash, 'Nurse', '03033333333', 'Lahore'),
+        ('Ali Hassan', 'reception@healthup.test', @PasswordHash, 'Receptionist', '03055555555', 'Front Desk');
 
     INSERT INTO Departments (DepartmentName, DepartmentType, Location, HeadOfDepartment, ContactNumber)
     VALUES
@@ -20,17 +20,17 @@ BEGIN
         ('General Medicine', 'Clinical', 'Ground Floor', 'Dr. Ahmed Raza', '042-111-333');
 
     INSERT INTO Patients (UserID, MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions)
-    SELECT UserID, 'MR-0001', '2001-08-12', 'Female', 'B+', '0304-4444444', 'Penicillin', 'None'
+    SELECT UserID, 'MR-0001', '2001-08-12', 'F', 'B+', '03044444444', 'Penicillin', 'None'
     FROM Users
     WHERE Email = 'patient@healthup.test';
 
     INSERT INTO Doctors (UserID, Specialization, Qualification, Designation, LicenseNumber, ExperienceYears, ConsultationFee, AvailableForOPD, AvailableForIPD)
-    SELECT UserID, 'Cardiology', 'MBBS, FCPS', 'Consultant Cardiologist', 'PMDC-HEALTHUP-001', 9, 2500, 1, 1
+    SELECT UserID, 'Cardiology', 'MBBS', 'Consultant', 'PMDC-HEALTHUP-001', 9, 2500, 1, 1
     FROM Users
     WHERE Email = 'doctor@healthup.test';
 
     INSERT INTO Nurses (UserID, DepartmentID, ShiftTime, NurseType, Certification)
-    SELECT u.UserID, d.DepartmentID, 'Morning', 'Registered Nurse', 'BSc Nursing'
+    SELECT u.UserID, d.DepartmentID, '09:00-17:00', NULL, NULL
     FROM Users u
     CROSS JOIN Departments d
     WHERE u.Email = 'nurse@healthup.test' AND d.DepartmentName = 'Cardiology';
@@ -41,6 +41,11 @@ BEGIN
     CROSS JOIN Departments dep
     WHERE dep.DepartmentName = 'Cardiology';
 
+    INSERT INTO DoctorSchedules (DoctorID, DayOfWeek, StartTime, EndTime, SlotDurationMinutes, IsActive)
+    SELECT d.DoctorID, v.DayOfWeek, '09:00:00', '17:00:00', 30, 1
+    FROM Doctors d
+    CROSS JOIN (VALUES (1),(2),(3),(4),(5)) v(DayOfWeek);
+
     INSERT INTO Wards (DepartmentID, WardName, WardType, Floor, TotalBeds, DailyCharges, NurseInCharge)
     SELECT dep.DepartmentID, 'Cardiology Ward A', 'General', 1, 20, 5000, nurse.NurseID
     FROM Departments dep
@@ -48,7 +53,7 @@ BEGIN
     WHERE dep.DepartmentName = 'Cardiology';
 
     INSERT INTO Beds (WardID, BedNumber, BedType, Status, DailyCharges)
-    SELECT WardID, 'A-101', 'Standard', 'Available', 5000
+    SELECT WardID, 'A-101', 'General', 'Available', 5000
     FROM Wards
     WHERE WardName = 'Cardiology Ward A';
 
@@ -76,6 +81,12 @@ BEGIN
     FROM Patients p
     CROSS JOIN Doctors d
     CROSS JOIN OPDRooms r;
+
+    INSERT INTO DutyRoster (UserID, DepartmentID, ShiftDate, ShiftType, ShiftStartTime, ShiftEndTime)
+    SELECT u.UserID, d.DepartmentID, CONVERT(date, DATEADD(DAY, 1, GETDATE())), 'Custom', '09:00', '17:00'
+    FROM Users u
+    CROSS JOIN Departments d
+    WHERE u.Role = 'Nurse' AND d.DepartmentName = 'Cardiology';
 
     -- Seed initial doctor reviews for demo/reporting.
     INSERT INTO Reviews (PatientID, DoctorID, Rating, Comments)

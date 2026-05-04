@@ -20,7 +20,8 @@ CREATE TABLE Users (
     Address NVARCHAR(255) NULL,
     CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
     IsActive BIT NOT NULL DEFAULT 1,
-    CONSTRAINT CK_Users_Role CHECK (Role IN ('Admin', 'Patient', 'Doctor', 'Nurse', 'Receptionist'))
+    CONSTRAINT CK_Users_Role CHECK (Role IN ('Admin', 'Patient', 'Doctor', 'Nurse', 'Receptionist')),
+    CONSTRAINT CK_Users_Phone CHECK (Phone IS NULL OR Phone LIKE '03[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]')
 );
 
 CREATE TABLE Patients (
@@ -35,7 +36,8 @@ CREATE TABLE Patients (
     ChronicConditions NVARCHAR(MAX) NULL,
     CONSTRAINT FK_Patients_Users FOREIGN KEY (UserID) REFERENCES Users(UserID),
     CONSTRAINT CK_Patients_Gender CHECK (Gender IN ('M', 'F', 'Other')),
-    CONSTRAINT CK_Patients_BloodGroup CHECK (BloodGroup IN ('O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', NULL))
+    CONSTRAINT CK_Patients_BloodGroup CHECK (BloodGroup IN ('O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', NULL)),
+    CONSTRAINT CK_Patients_EmergencyContact CHECK (EmergencyContact IS NULL OR EmergencyContact LIKE '03[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]')
 );
 
 CREATE TABLE Doctors (
@@ -51,7 +53,10 @@ CREATE TABLE Doctors (
     AvailableForIPD BIT NOT NULL DEFAULT 0,
     CONSTRAINT FK_Doctors_Users FOREIGN KEY (UserID) REFERENCES Users(UserID),
     CONSTRAINT CK_Doctors_Experience CHECK (ExperienceYears >= 0),
-    CONSTRAINT CK_Doctors_Fee CHECK (ConsultationFee >= 0)
+    CONSTRAINT CK_Doctors_Fee CHECK (ConsultationFee >= 0),
+    CONSTRAINT CK_Doctors_Specialization CHECK (Specialization IN ('Cardiology', 'Neurology', 'Orthopedics', 'Pediatrics', 'General Medicine', 'Dermatology', 'ENT')),
+    CONSTRAINT CK_Doctors_Qualification CHECK (Qualification IS NULL OR Qualification IN ('MBBS', 'BDS', 'FCPS', 'MS', 'MD')),
+    CONSTRAINT CK_Doctors_Designation CHECK (Designation IS NULL OR Designation IN ('Consultant', 'Specialist', 'Resident', 'Senior Registrar'))
 );
 
 CREATE TABLE Departments (
@@ -60,7 +65,9 @@ CREATE TABLE Departments (
     DepartmentType NVARCHAR(50) NOT NULL,
     Location NVARCHAR(120) NULL,
     HeadOfDepartment NVARCHAR(120) NULL,
-    ContactNumber NVARCHAR(30) NULL
+    ContactNumber NVARCHAR(30) NULL,
+    CONSTRAINT CK_Departments_Type CHECK (DepartmentType IN ('Clinical', 'Surgical', 'Diagnostics', 'Support')),
+    CONSTRAINT CK_Departments_ContactNumber CHECK (ContactNumber IS NULL OR ContactNumber LIKE '03[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]')
 );
 
 CREATE TABLE Nurses (
@@ -71,7 +78,8 @@ CREATE TABLE Nurses (
     NurseType NVARCHAR(50) NULL,
     Certification NVARCHAR(150) NULL,
     CONSTRAINT FK_Nurses_Users FOREIGN KEY (UserID) REFERENCES Users(UserID),
-    CONSTRAINT FK_Nurses_Departments FOREIGN KEY (DepartmentID) REFERENCES Departments(DepartmentID)
+    CONSTRAINT FK_Nurses_Departments FOREIGN KEY (DepartmentID) REFERENCES Departments(DepartmentID),
+    CONSTRAINT CK_Nurses_ShiftTime CHECK (ShiftTime IS NULL OR ShiftTime LIKE '[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]')
 );
 
 CREATE TABLE DoctorQualifications (
@@ -104,6 +112,7 @@ CREATE TABLE Wards (
     NurseInCharge INT NULL,
     CONSTRAINT FK_Wards_Departments FOREIGN KEY (DepartmentID) REFERENCES Departments(DepartmentID),
     CONSTRAINT FK_Wards_NurseInCharge FOREIGN KEY (NurseInCharge) REFERENCES Nurses(NurseID),
+    CONSTRAINT CK_Wards_Type CHECK (WardType IN ('General', 'Private', 'ICU', 'Isolation')),
     CONSTRAINT CK_Wards_TotalBeds CHECK (TotalBeds > 0),
     CONSTRAINT CK_Wards_DailyCharges CHECK (DailyCharges >= 0)
 );
@@ -117,6 +126,7 @@ CREATE TABLE Beds (
     DailyCharges DECIMAL(10,2) NOT NULL DEFAULT 0,
     CONSTRAINT FK_Beds_Wards FOREIGN KEY (WardID) REFERENCES Wards(WardID),
     CONSTRAINT UQ_Beds_Ward_BedNumber UNIQUE (WardID, BedNumber),
+    CONSTRAINT CK_Beds_Type CHECK (BedType IN ('General', 'Semi-Private', 'Private', 'ICU', 'Isolation')),
     CONSTRAINT CK_Beds_Status CHECK (Status IN ('Available', 'Occupied', 'Reserved', 'Maintenance')),
     CONSTRAINT CK_Beds_DailyCharges CHECK (DailyCharges >= 0)
 );
@@ -130,6 +140,7 @@ CREATE TABLE OPDRooms (
     Capacity INT NOT NULL DEFAULT 1,
     CONSTRAINT FK_OPDRooms_Departments FOREIGN KEY (DepartmentID) REFERENCES Departments(DepartmentID),
     CONSTRAINT UQ_OPDRooms_Department_Room UNIQUE (DepartmentID, RoomNumber),
+    CONSTRAINT CK_OPDRooms_Type CHECK (RoomType IN ('Consultation', 'Procedure', 'Emergency')),
     CONSTRAINT CK_OPDRooms_Status CHECK (Status IN ('Available', 'Occupied', 'Maintenance')),
     CONSTRAINT CK_OPDRooms_Capacity CHECK (Capacity > 0)
 );
@@ -140,8 +151,13 @@ CREATE TABLE DutyRoster (
     DepartmentID INT NOT NULL,
     ShiftDate DATE NOT NULL,
     ShiftType NVARCHAR(40) NOT NULL,
+    ShiftStartTime TIME NOT NULL,
+    ShiftEndTime TIME NOT NULL,
     CONSTRAINT FK_DutyRoster_Users FOREIGN KEY (UserID) REFERENCES Users(UserID),
-    CONSTRAINT FK_DutyRoster_Departments FOREIGN KEY (DepartmentID) REFERENCES Departments(DepartmentID)
+    CONSTRAINT FK_DutyRoster_Departments FOREIGN KEY (DepartmentID) REFERENCES Departments(DepartmentID),
+    CONSTRAINT CK_DutyRoster_ShiftType CHECK (ShiftType IN ('Morning', 'Evening', 'Night', 'Custom')),
+    CONSTRAINT CK_DutyRoster_TimeWindow CHECK (ShiftStartTime < ShiftEndTime),
+    CONSTRAINT UQ_DutyRoster_User_Department_Date_Shift UNIQUE (UserID, DepartmentID, ShiftDate, ShiftStartTime, ShiftEndTime)
 );
 
 CREATE TABLE HospitalEquipment (
@@ -151,7 +167,8 @@ CREATE TABLE HospitalEquipment (
     Status NVARCHAR(40) NOT NULL DEFAULT 'Available',
     LastMaintenanceDate DATE NULL,
     NextMaintenanceDue DATE NULL,
-    CONSTRAINT FK_HospitalEquipment_Departments FOREIGN KEY (DepartmentID) REFERENCES Departments(DepartmentID)
+    CONSTRAINT FK_HospitalEquipment_Departments FOREIGN KEY (DepartmentID) REFERENCES Departments(DepartmentID),
+    CONSTRAINT CK_HospitalEquipment_Status CHECK (Status IN ('Available', 'In Use', 'Maintenance', 'Out of Service'))
 );
 
 CREATE TABLE OTRooms (
@@ -166,7 +183,8 @@ CREATE TABLE MedicalTests (
     TestCode NVARCHAR(40) NOT NULL UNIQUE,
     Category NVARCHAR(80) NOT NULL,
     Cost DECIMAL(10,2) NOT NULL,
-    CONSTRAINT CK_MedicalTests_Cost CHECK (Cost >= 0)
+    CONSTRAINT CK_MedicalTests_Cost CHECK (Cost >= 0),
+    CONSTRAINT CK_MedicalTests_Category CHECK (Category IN ('Pathology', 'Radiology', 'Cardiology', 'Microbiology'))
 );
 
 CREATE TABLE Medications (
@@ -176,7 +194,9 @@ CREATE TABLE Medications (
     Category NVARCHAR(80) NULL,
     UnitPrice DECIMAL(10,2) NOT NULL,
     Form NVARCHAR(50) NULL,
-    CONSTRAINT CK_Medications_UnitPrice CHECK (UnitPrice >= 0)
+    CONSTRAINT CK_Medications_UnitPrice CHECK (UnitPrice >= 0),
+    CONSTRAINT CK_Medications_Category CHECK (Category IS NULL OR Category IN ('Antibiotic', 'Analgesic', 'Antipyretic', 'Antiseptic', 'Other')),
+    CONSTRAINT CK_Medications_Form CHECK (Form IS NULL OR Form IN ('Tablet', 'Capsule', 'Syrup', 'Injection', 'Ointment'))
 );
 
 CREATE TABLE Inventory (
@@ -204,7 +224,7 @@ CREATE TABLE OPDAppointments (
     CONSTRAINT FK_OPDAppointments_Doctors FOREIGN KEY (DoctorID) REFERENCES Doctors(DoctorID),
     CONSTRAINT FK_OPDAppointments_OPDRooms FOREIGN KEY (RoomID) REFERENCES OPDRooms(RoomID),
     CONSTRAINT UQ_OPDAppointments_Doctor_Date UNIQUE (DoctorID, AppointmentDate),
-    CONSTRAINT CK_OPDAppointments_Status CHECK (Status IN ('Pending', 'Confirmed', 'Completed', 'Cancelled'))
+    CONSTRAINT CK_OPDAppointments_Status CHECK (Status IN ('Pending', 'PendingPayment', 'Confirmed', 'CheckedIn', 'Completed', 'Cancelled'))
 );
 
 CREATE TABLE OPDPrescriptions (
@@ -228,7 +248,8 @@ CREATE TABLE OPDTestOrders (
     Results NVARCHAR(MAX) NULL,
     CONSTRAINT FK_OPDTestOrders_Appointments FOREIGN KEY (AppointmentID) REFERENCES OPDAppointments(AppointmentID),
     CONSTRAINT FK_OPDTestOrders_Patients FOREIGN KEY (PatientID) REFERENCES Patients(PatientID),
-    CONSTRAINT FK_OPDTestOrders_MedicalTests FOREIGN KEY (TestID) REFERENCES MedicalTests(TestID)
+    CONSTRAINT FK_OPDTestOrders_MedicalTests FOREIGN KEY (TestID) REFERENCES MedicalTests(TestID),
+    CONSTRAINT CK_OPDTestOrders_Status CHECK (Status IN ('Ordered', 'Completed', 'Cancelled'))
 );
 
 CREATE TABLE OPDPayments (
@@ -241,7 +262,7 @@ CREATE TABLE OPDPayments (
     CONSTRAINT FK_OPDPayments_Appointments FOREIGN KEY (AppointmentID) REFERENCES OPDAppointments(AppointmentID),
     CONSTRAINT FK_OPDPayments_Patients FOREIGN KEY (PatientID) REFERENCES Patients(PatientID),
     CONSTRAINT CK_OPDPayments_Amounts CHECK (TotalAmount >= 0 AND PaidAmount >= 0),
-    CONSTRAINT CK_OPDPayments_Status CHECK (Status IN ('Pending', 'Partial', 'Paid', 'Failed'))
+    CONSTRAINT CK_OPDPayments_Status CHECK (Status IN ('Pending', 'Paid', 'Rejected'))
 );
 
 CREATE TABLE IPDAdmissions (
@@ -273,7 +294,9 @@ CREATE TABLE SurgeryBookings (
     Status NVARCHAR(30) NOT NULL DEFAULT 'Scheduled',
     CONSTRAINT FK_SurgeryBookings_IPDAdmissions FOREIGN KEY (AdmissionID) REFERENCES IPDAdmissions(AdmissionID),
     CONSTRAINT FK_SurgeryBookings_OTRooms FOREIGN KEY (OT_ID) REFERENCES OTRooms(OT_ID),
-    CONSTRAINT FK_SurgeryBookings_Doctors FOREIGN KEY (SurgeonID) REFERENCES Doctors(DoctorID)
+    CONSTRAINT FK_SurgeryBookings_Doctors FOREIGN KEY (SurgeonID) REFERENCES Doctors(DoctorID),
+    CONSTRAINT CK_SurgeryBookings_Status CHECK (Status IN ('Scheduled', 'Completed', 'Cancelled')),
+    CONSTRAINT CK_SurgeryBookings_TimeWindow CHECK (EndTime IS NULL OR EndTime > StartTime)
 );
 
 CREATE TABLE IPDProgressNotes (
@@ -310,7 +333,8 @@ CREATE TABLE IPDTestOrders (
     Results NVARCHAR(MAX) NULL,
     CONSTRAINT FK_IPDTestOrders_IPDAdmissions FOREIGN KEY (AdmissionID) REFERENCES IPDAdmissions(AdmissionID),
     CONSTRAINT FK_IPDTestOrders_Patients FOREIGN KEY (PatientID) REFERENCES Patients(PatientID),
-    CONSTRAINT FK_IPDTestOrders_MedicalTests FOREIGN KEY (TestID) REFERENCES MedicalTests(TestID)
+    CONSTRAINT FK_IPDTestOrders_MedicalTests FOREIGN KEY (TestID) REFERENCES MedicalTests(TestID),
+    CONSTRAINT CK_IPDTestOrders_Status CHECK (Status IN ('Ordered', 'Completed', 'Cancelled'))
 );
 
 CREATE TABLE IPDPayments (
@@ -323,7 +347,7 @@ CREATE TABLE IPDPayments (
     CONSTRAINT FK_IPDPayments_IPDAdmissions FOREIGN KEY (AdmissionID) REFERENCES IPDAdmissions(AdmissionID),
     CONSTRAINT FK_IPDPayments_Patients FOREIGN KEY (PatientID) REFERENCES Patients(PatientID),
     CONSTRAINT CK_IPDPayments_Amounts CHECK (TotalAmount >= 0 AND PaidAmount >= 0),
-    CONSTRAINT CK_IPDPayments_Status CHECK (Status IN ('Pending', 'Partial', 'Paid', 'Failed'))
+    CONSTRAINT CK_IPDPayments_Status CHECK (Status IN ('Pending', 'Paid', 'Rejected'))
 );
 
 CREATE TABLE OPDPrescriptionMedications (
@@ -474,12 +498,59 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    INSERT INTO OPDAppointments
-        (PatientID, DoctorID, RoomID, AppointmentDate, AppointmentType, Status, ChiefComplaint, TokenNumber)
-    VALUES
-        (@PatientID, @DoctorID, @RoomID, @AppointmentDate, @AppointmentType, 'Pending', @ChiefComplaint, NEXT VALUE FOR OPDTokenSequence);
+    BEGIN TRY
+        BEGIN TRANSACTION;
 
-    SELECT SCOPE_IDENTITY() AS AppointmentID;
+        DECLARE @DayOfWeek INT = DATEPART(WEEKDAY, @AppointmentDate) - 1;
+        DECLARE @AppointmentTime TIME = CONVERT(TIME, @AppointmentDate);
+        DECLARE @SlotEnd DATETIME2 = DATEADD(MINUTE, 30, @AppointmentDate);
+        DECLARE @AppointmentID INT;
+
+        IF DATEPART(MINUTE, @AppointmentDate) % 30 <> 0
+        BEGIN
+            THROW 50001, 'Appointments must start on 30-minute slots.', 1;
+        END
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM DoctorSchedules ds
+            WHERE ds.DoctorID = @DoctorID
+              AND ds.DayOfWeek = @DayOfWeek
+              AND ds.IsActive = 1
+              AND @AppointmentTime >= ds.StartTime
+              AND DATEADD(MINUTE, 30, @AppointmentTime) <= ds.EndTime
+        )
+        BEGIN
+            THROW 50002, 'Selected appointment time is outside doctor schedule.', 1;
+        END
+
+        IF EXISTS (
+            SELECT 1
+            FROM OPDAppointments a
+            WHERE a.DoctorID = @DoctorID
+              AND a.Status IN ('Pending', 'Confirmed')
+              AND a.AppointmentDate < @SlotEnd
+              AND DATEADD(MINUTE, 30, a.AppointmentDate) > @AppointmentDate
+        )
+        BEGIN
+            THROW 50003, 'Selected appointment slot is already booked.', 1;
+        END
+
+        INSERT INTO OPDAppointments
+            (PatientID, DoctorID, RoomID, AppointmentDate, AppointmentType, Status, ChiefComplaint, TokenNumber)
+        VALUES
+            (@PatientID, @DoctorID, @RoomID, @AppointmentDate, @AppointmentType, 'Pending', @ChiefComplaint, NEXT VALUE FOR OPDTokenSequence);
+
+        SET @AppointmentID = SCOPE_IDENTITY();
+
+        COMMIT TRANSACTION;
+        SELECT @AppointmentID AS AppointmentID;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
 END;
 GO
 
@@ -495,8 +566,8 @@ BEGIN
     DECLARE @Status NVARCHAR(30) =
         CASE
             WHEN @PaidAmount <= 0 THEN 'Pending'
-            WHEN @PaidAmount < @TotalAmount THEN 'Partial'
             WHEN @PaidAmount >= @TotalAmount THEN 'Paid'
+            WHEN @PaidAmount < @TotalAmount THEN 'Pending'
             ELSE 'Pending'
         END;
 
@@ -582,12 +653,12 @@ BEGIN
 
         DECLARE @PaymentID INT;
         DECLARE @Status NVARCHAR(30) =
-            CASE
-                WHEN @PaidAmount <= 0 THEN 'Pending'
-                WHEN @PaidAmount < @TotalAmount THEN 'Partial'
-                WHEN @PaidAmount >= @TotalAmount THEN 'Paid'
-                ELSE 'Pending'
-            END;
+        CASE
+            WHEN @PaidAmount <= 0 THEN 'Pending'
+            WHEN @PaidAmount >= @TotalAmount THEN 'Paid'
+            WHEN @PaidAmount < @TotalAmount THEN 'Pending'
+            ELSE 'Pending'
+        END;
 
         INSERT INTO OPDPayments (AppointmentID, PatientID, TotalAmount, PaidAmount, Status)
         VALUES (@AppointmentID, @PatientID, @TotalAmount, @PaidAmount, @Status);
@@ -651,6 +722,33 @@ BEGIN
             RAISERROR('Bed is not available for admission.', 16, 1);
         END
 
+        IF NOT EXISTS (
+            SELECT 1
+            FROM Doctors d
+            INNER JOIN Users u ON u.UserID = d.UserID
+            WHERE d.DoctorID = @AttendingDoctorID
+              AND u.IsActive = 1
+        )
+        BEGIN
+            RAISERROR('Attending doctor must be an active doctor.', 16, 1);
+        END
+
+        IF EXISTS (
+            SELECT 1
+            FROM Wards w
+            WHERE w.WardID = @WardID
+              AND EXISTS (SELECT 1 FROM DoctorDepartments dd WHERE dd.DoctorID = @AttendingDoctorID)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM DoctorDepartments dd
+                  WHERE dd.DoctorID = @AttendingDoctorID
+                    AND dd.DepartmentID = w.DepartmentID
+              )
+        )
+        BEGIN
+            RAISERROR('Attending doctor is not assigned to the selected ward department.', 16, 1);
+        END
+
         INSERT INTO IPDAdmissions
             (PatientID, AttendingDoctorID, BedID, WardID, AdmissionType, Status, ClinicalDiagnosis)
         VALUES
@@ -673,6 +771,37 @@ BEGIN
 END;
 GO
 
+CREATE OR ALTER TRIGGER trg_IPDAdmissions_DoctorWardValidation
+ON IPDAdmissions
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1
+        FROM inserted i
+        INNER JOIN Doctors d ON d.DoctorID = i.AttendingDoctorID
+        INNER JOIN Users u ON u.UserID = d.UserID
+        INNER JOIN Wards w ON w.WardID = i.WardID
+        WHERE u.IsActive <> 1
+           OR (
+                EXISTS (SELECT 1 FROM DoctorDepartments dd WHERE dd.DoctorID = d.DoctorID)
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM DoctorDepartments dd
+                    WHERE dd.DoctorID = d.DoctorID
+                      AND dd.DepartmentID = w.DepartmentID
+                )
+           )
+    )
+    BEGIN
+        RAISERROR('Attending doctor must be active and mapped to ward department.', 16, 1);
+        ROLLBACK TRANSACTION;
+    END
+END;
+GO
+
 /*
     ==========================
     BONUS: TRIGGERS
@@ -691,8 +820,8 @@ BEGIN
     SET p.Status =
         CASE
             WHEN p.PaidAmount <= 0 THEN 'Pending'
-            WHEN p.PaidAmount < p.TotalAmount THEN 'Partial'
             WHEN p.PaidAmount >= p.TotalAmount THEN 'Paid'
+            WHEN p.PaidAmount < p.TotalAmount THEN 'Pending'
             ELSE p.Status
         END
     FROM OPDPayments p
@@ -711,8 +840,8 @@ BEGIN
     SET p.Status =
         CASE
             WHEN p.PaidAmount <= 0 THEN 'Pending'
-            WHEN p.PaidAmount < p.TotalAmount THEN 'Partial'
             WHEN p.PaidAmount >= p.TotalAmount THEN 'Paid'
+            WHEN p.PaidAmount < p.TotalAmount THEN 'Pending'
             ELSE p.Status
         END
     FROM IPDPayments p
@@ -755,7 +884,7 @@ IF NOT EXISTS (
 )
 BEGIN
     ALTER TABLE DutyRoster
-    ADD CONSTRAINT UQ_DutyRoster_User_Department_Date_Shift UNIQUE (UserID, DepartmentID, ShiftDate, ShiftType);
+    ADD CONSTRAINT UQ_DutyRoster_User_Department_Date_Shift UNIQUE (UserID, DepartmentID, ShiftDate, ShiftStartTime, ShiftEndTime);
 END
 GO
 
@@ -858,8 +987,8 @@ BEGIN
         DECLARE @Status NVARCHAR(30) =
             CASE
                 WHEN @PaidAmount <= 0 THEN 'Pending'
-                WHEN @PaidAmount < @TotalAmount THEN 'Partial'
                 WHEN @PaidAmount >= @TotalAmount THEN 'Paid'
+                WHEN @PaidAmount < @TotalAmount THEN 'Pending'
                 ELSE 'Pending'
             END;
 
@@ -950,7 +1079,10 @@ CREATE TABLE DoctorSchedules (
     IsActive BIT DEFAULT 1,
     CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
     UpdatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-    UpdatedBy INT FOREIGN KEY REFERENCES Users(UserID)
+    UpdatedBy INT FOREIGN KEY REFERENCES Users(UserID),
+    CONSTRAINT CK_DoctorSchedules_DayOfWeek CHECK (DayOfWeek BETWEEN 0 AND 6),
+    CONSTRAINT CK_DoctorSchedules_TimeWindow CHECK (StartTime < EndTime),
+    CONSTRAINT CK_DoctorSchedules_SlotDuration CHECK (SlotDurationMinutes = 30)
 );
 GO
 

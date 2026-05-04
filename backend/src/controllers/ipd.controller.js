@@ -13,6 +13,45 @@ const getActorContext = async (pool, userId) => {
   return result.recordset[0] || { PatientID: null, DoctorID: null };
 };
 
+const validateDoctorWardAssignment = async (pool, attendingDoctorId, wardId) => {
+  const doctorWardValidation = await pool
+    .request()
+    .input("AttendingDoctorID", sql.Int, attendingDoctorId)
+    .input("WardID", sql.Int, wardId)
+    .query(`
+      SELECT d.DoctorID
+      FROM Doctors d
+      INNER JOIN Users u ON u.UserID = d.UserID
+      INNER JOIN Wards w ON w.WardID = @WardID
+      WHERE d.DoctorID = @AttendingDoctorID
+        AND u.IsActive = 1
+        AND (
+          NOT EXISTS (SELECT 1 FROM DoctorDepartments dd WHERE dd.DoctorID = d.DoctorID)
+          OR EXISTS (
+            SELECT 1
+            FROM DoctorDepartments dd
+            WHERE dd.DoctorID = d.DoctorID AND dd.DepartmentID = w.DepartmentID
+          )
+        )
+    `);
+
+  return Boolean(doctorWardValidation.recordset[0]);
+};
+
+const getBedInWard = async (pool, bedId, wardId) => {
+  const bedResult = await pool
+    .request()
+    .input("BedID", sql.Int, bedId)
+    .input("WardID", sql.Int, wardId)
+    .query(`
+      SELECT BedID, WardID, Status
+      FROM Beds
+      WHERE BedID = @BedID AND WardID = @WardID
+    `);
+
+  return bedResult.recordset[0] || null;
+};
+
 const listAdmissions = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const request = pool.request();
@@ -83,6 +122,18 @@ const createAdmission = asyncHandler(async (req, res) => {
   }
 
   const pool = await getPool();
+  const isDoctorAssignable = await validateDoctorWardAssignment(pool, attendingDoctorId, wardId);
+  if (!isDoctorAssignable) {
+    return res.status(400).json({ message: "Attending doctor must be active and assigned to the selected ward department." });
+  }
+  const bed = await getBedInWard(pool, bedId, wardId);
+  if (!bed) {
+    return res.status(400).json({ message: "Selected bed must belong to the selected ward." });
+  }
+  if (bed.Status !== "Available") {
+    return res.status(400).json({ message: "Bed is not available for admission." });
+  }
+
   const created = await pool
     .request()
     .input("PatientID", sql.Int, patientId)
@@ -128,6 +179,32 @@ const updateAdmission = asyncHandler(async (req, res) => {
   }
 
   const pool = await getPool();
+  const existingAdmissionResult = await pool
+    .request()
+    .input("AdmissionID", sql.Int, req.params.id)
+    .query(`
+      SELECT AdmissionID, BedID
+      FROM IPDAdmissions
+      WHERE AdmissionID = @AdmissionID
+    `);
+  const existingAdmission = existingAdmissionResult.recordset[0];
+  if (!existingAdmission) {
+    return res.status(404).json({ message: "Admission not found" });
+  }
+
+  const isDoctorAssignable = await validateDoctorWardAssignment(pool, attendingDoctorId, wardId);
+  if (!isDoctorAssignable) {
+    return res.status(400).json({ message: "Attending doctor must be active and assigned to the selected ward department." });
+  }
+  const bed = await getBedInWard(pool, bedId, wardId);
+  if (!bed) {
+    return res.status(400).json({ message: "Selected bed must belong to the selected ward." });
+  }
+  const isSameBed = Number(existingAdmission.BedID) === Number(bedId);
+  if (!isSameBed && bed.Status !== "Available") {
+    return res.status(400).json({ message: "Selected bed is not available." });
+  }
+
   const result = await pool
     .request()
     .input("AdmissionID", sql.Int, req.params.id)
@@ -157,6 +234,17 @@ const updateAdmission = asyncHandler(async (req, res) => {
 
   if (!result.recordset[0]) {
     return res.status(404).json({ message: "Admission not found" });
+  }
+
+  if (!isSameBed) {
+    await pool
+      .request()
+      .input("PreviousBedID", sql.Int, existingAdmission.BedID)
+      .query(`
+        UPDATE Beds
+        SET Status = 'Available'
+        WHERE BedID = @PreviousBedID
+      `);
   }
 
   res.json(result.recordset[0]);

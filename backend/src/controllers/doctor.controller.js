@@ -5,10 +5,14 @@ const listDoctors = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const result = await pool.request().query(`
     SELECT d.DoctorID, u.FullName, u.Email, u.Phone, d.Specialization,
-           d.Designation, d.ConsultationFee, d.AvailableForOPD, d.AvailableForIPD
+           d.Designation, d.ConsultationFee, d.AvailableForOPD, d.AvailableForIPD,
+           STRING_AGG(dep.DepartmentName, ', ') AS Departments
     FROM Doctors d
     INNER JOIN Users u ON u.UserID = d.UserID
+    LEFT JOIN DoctorDepartments dd ON dd.DoctorID = d.DoctorID
+    LEFT JOIN Departments dep ON dep.DepartmentID = dd.DepartmentID
     WHERE u.IsActive = 1
+    GROUP BY d.DoctorID, u.FullName, u.Email, u.Phone, d.Specialization, d.Designation, d.ConsultationFee, d.AvailableForOPD, d.AvailableForIPD
     ORDER BY u.FullName
   `);
   res.json(result.recordset);

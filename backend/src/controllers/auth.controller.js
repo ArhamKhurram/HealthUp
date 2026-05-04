@@ -2,9 +2,9 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
+const { normalizePhone, isValidPakistanPhone, validateCreatePassword } = require("../utils/userValidation");
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PHONE_REGEX = /^03\d{9}$/;  // Pakistani mobile format: 03XXXXXXXXX (11 digits)
 
 function shapeAuthUser(user) {
   return {
@@ -31,7 +31,9 @@ function validatePatientRegistration(payload) {
   const fullName = normalizeOptional(payload.fullName);
   const email = normalizeOptional(payload.email)?.toLowerCase() || null;
   const password = typeof payload.password === "string" ? payload.password : "";
-  const passwordConfirm = typeof payload.passwordConfirm === "string" ? payload.passwordConfirm : "";
+  const passwordConfirm = typeof payload.passwordConfirm === "string"
+    ? payload.passwordConfirm
+    : (typeof payload.confirmPassword === "string" ? payload.confirmPassword : "");
   const gender = normalizeOptional(payload.gender);
   const dateOfBirthRaw = normalizeOptional(payload.dateOfBirth);
   let dateOfBirth = null;
@@ -45,19 +47,14 @@ function validatePatientRegistration(payload) {
     errors.push({ field: "email", message: "Enter a valid email address" });
   }
 
-  if (!password) {
-    errors.push({ field: "password", message: "Password is required" });
-  } else if (password.length < 8) {
-    errors.push({ field: "password", message: "Password must be at least 8 characters" });
-  }
+  errors.push(...validateCreatePassword(password, passwordConfirm).map((error) => {
+    if (error.field === "confirmPassword") {
+      return { field: "passwordConfirm", message: error.message };
+    }
+    return error;
+  }));
 
-  if (!passwordConfirm) {
-    errors.push({ field: "passwordConfirm", message: "Please confirm your password" });
-  } else if (password && password !== passwordConfirm) {
-    errors.push({ field: "passwordConfirm", message: "Passwords do not match" });
-  }
-
-  if (phone && !PHONE_REGEX.test(phone)) {
+  if (phone && !isValidPakistanPhone(phone)) {
     errors.push({ field: "phone", message: "Phone must be 11 digits starting with 0 (e.g., 03001234567)" });
   }
 
@@ -93,7 +90,7 @@ function validatePatientRegistration(payload) {
       fullName,
       email,
       password,
-      phone,
+      phone: normalizePhone(phone),
       address: normalizeOptional(payload.address),
       mrNumber: normalizeOptional(payload.mrNumber),
       dateOfBirth,
@@ -171,56 +168,47 @@ const registerPatient = asyncHandler(async (req, res) => {
     });
   }
 
-   const hash = await bcrypt.hash(sanitized.password, 10);
-   const pool = await getPool();
-   const transaction = new sql.Transaction(pool);
+  const hash = await bcrypt.hash(sanitized.password, 10);
+  const pool = await getPool();
+  const transaction = new sql.Transaction(pool);
 
-   await transaction.begin();
+  await transaction.begin();
 
-   try {
-     await new sql.Request(transaction)
-        .input("FullName", sql.NVarChar(120), sanitized.fullName)
-        .input("Email", sql.NVarChar(150), sanitized.email)
-        .input("Password", sql.NVarChar(255), hash)
-        .input("Phone", sql.NVarChar(30), sanitized.phone)
-        .input("Address", sql.NVarChar(255), sanitized.address)
-        .query(`
-          INSERT INTO Users (FullName, Email, Password, Role, Phone, Address)
-          VALUES (@FullName, @Email, @Password, 'Patient', @Phone, @Address)
-        `);
+  try {
+    const userResult = await new sql.Request(transaction)
+      .input("FullName", sql.NVarChar(120), sanitized.fullName)
+      .input("Email", sql.NVarChar(150), sanitized.email)
+      .input("Password", sql.NVarChar(255), hash)
+      .input("Phone", sql.NVarChar(30), sanitized.phone)
+      .input("Address", sql.NVarChar(255), sanitized.address)
+      .query(`
+        INSERT INTO Users (FullName, Email, Password, Role, Phone, Address)
+        OUTPUT INSERTED.UserID, INSERTED.FullName, INSERTED.Email, INSERTED.Role, INSERTED.Phone, INSERTED.Address
+        VALUES (@FullName, @Email, @Password, 'Patient', @Phone, @Address)
+      `);
+    const user = userResult.recordset[0];
+    if (!user?.UserID) {
+      throw new Error("Unable to create user record");
+    }
 
-      const userResult = await new sql.Request(transaction)
-        .query("SELECT SCOPE_IDENTITY() AS UserID");
-      const userId = userResult.recordset[0].UserID;
+    const generatedMrNumber = sanitized.mrNumber || `MR-${String(user.UserID).padStart(4, "0")}`;
 
-      // Fetch the complete user record
-      const userFull = await new sql.Request(transaction)
-        .input("UserID", sql.Int, userId)
-        .query(`
-          SELECT u.UserID, u.FullName, u.Email, u.Role, u.Phone, u.Address
-          FROM Users u
-          WHERE u.UserID = @UserID
-        `);
-      const user = userFull.recordset[0];
-
-      const generatedMrNumber = sanitized.mrNumber || `MR-${String(userId).padStart(4, "0")}`;
-
-      const patientResult = await new sql.Request(transaction)
-        .input("UserID", sql.Int, user.UserID)
-        .input("MRNumber", sql.NVarChar(50), generatedMrNumber)
-        .input("DateOfBirth", sql.Date, sanitized.dateOfBirth)
-        .input("Gender", sql.NVarChar(20), sanitized.gender)
-        .input("BloodGroup", sql.NVarChar(10), sanitized.bloodGroup)
-        .input("EmergencyContact", sql.NVarChar(50), sanitized.emergencyContact)
-        .input("Allergies", sql.NVarChar(sql.MAX), sanitized.allergies)
-        .input("ChronicConditions", sql.NVarChar(sql.MAX), sanitized.chronicConditions)
-        .query(`
-          INSERT INTO Patients
-            (UserID, MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions)
-          OUTPUT INSERTED.PatientID, INSERTED.MRNumber
-          VALUES
-            (@UserID, @MRNumber, @DateOfBirth, @Gender, @BloodGroup, @EmergencyContact, @Allergies, @ChronicConditions)
-        `);
+    const patientResult = await new sql.Request(transaction)
+      .input("UserID", sql.Int, user.UserID)
+      .input("MRNumber", sql.NVarChar(50), generatedMrNumber)
+      .input("DateOfBirth", sql.Date, sanitized.dateOfBirth)
+      .input("Gender", sql.NVarChar(20), sanitized.gender)
+      .input("BloodGroup", sql.NVarChar(10), sanitized.bloodGroup)
+      .input("EmergencyContact", sql.NVarChar(50), sanitized.emergencyContact)
+      .input("Allergies", sql.NVarChar(sql.MAX), sanitized.allergies)
+      .input("ChronicConditions", sql.NVarChar(sql.MAX), sanitized.chronicConditions)
+      .query(`
+        INSERT INTO Patients
+          (UserID, MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions)
+        OUTPUT INSERTED.PatientID, INSERTED.MRNumber
+        VALUES
+          (@UserID, @MRNumber, @DateOfBirth, @Gender, @BloodGroup, @EmergencyContact, @Allergies, @ChronicConditions)
+      `);
 
     const token = jwt.sign(
       { userId: user.UserID, role: user.Role, email: user.Email },

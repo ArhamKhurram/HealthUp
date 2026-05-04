@@ -125,6 +125,56 @@ select {
   background: #ffffff;
 }
 
+.password-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.password-field .icon-button {
+  padding: 10px;
+}
+
+.mode-switch {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  background: #e8f3f0;
+  padding: 4px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.mode-switch button {
+  background: transparent;
+  color: #0f766e;
+  padding: 8px 16px;
+}
+
+.mode-switch button.active {
+  background: #0f766e;
+  color: #ffffff;
+}
+
+.days-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.day-chip {
+  background: #e8f3f0;
+  color: #0f766e;
+  border: 1px solid #b8d6cf;
+  padding: 8px 0;
+}
+
+.day-chip.active {
+  background: #0f766e;
+  color: #ffffff;
+}
+
 button,
 .icon-button {
   border: 0;
