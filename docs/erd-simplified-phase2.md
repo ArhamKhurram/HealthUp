@@ -22,9 +22,15 @@ config:
 14. `Payments`
 15. `BillingDetails`
 16. `Reviews`
+17. `PatientVitals`
 
 Unified entities:
 - `Prescriptions`, `TestOrders`, `Payments`, `BillingDetails` cover both OPD and IPD.
+
+Database bonus objects currently in use:
+- Views: `vw_UserAuthProfile`, `vw_IPDAdmissionDetails`, `vw_PaymentSummary`, `vw_PatientVitalHistory`
+- Stored Procedures: `sp_LoginUser`, `sp_RegisterPatient`, `sp_ListIPDAdmissions`, `sp_CreateIPDAdmission`, `sp_UpdateIPDAdmission`, `sp_RecordPayment`, `sp_RecordPatientVital`, `sp_GetPatientVitalHistory`
+- Trigger: `trg_Payments_SetPaidAt`
 
 erDiagram
     Users {
@@ -191,6 +197,21 @@ erDiagram
         datetime CreatedAt
     }
 
+    PatientVitals {
+        int VitalID PK
+        int AdmissionID FK
+        int PatientID FK
+        int NurseID FK
+        datetime RecordedAt
+        decimal TemperatureC
+        int SystolicBP
+        int DiastolicBP
+        int HeartRate
+        int RespiratoryRate
+        int OxygenSaturation
+        string ProgressNote
+    }
+
     Users ||--o| Patients : "has"
     Users ||--o| Doctors : "has"
     Users ||--o| Nurses : "has"
@@ -220,3 +241,6 @@ erDiagram
     Payments ||--o{ BillingDetails : "contains"
     Patients ||--o{ Reviews : "writes"
     Doctors ||--o{ Reviews : "rated_by"
+    IPDAdmissions ||--o{ PatientVitals : "has"
+    Patients ||--o{ PatientVitals : "recorded_for"
+    Nurses ||--o{ PatientVitals : "records"
