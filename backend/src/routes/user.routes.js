@@ -1,3 +1,4 @@
+// Admin user-management routes.
 const router = require("express").Router();
 const { listUsers, getUser, createUser, updateUser, deleteUser } = require("../controllers/user.controller");
 const { requireAuth, requireRole } = require("../middleware/auth");

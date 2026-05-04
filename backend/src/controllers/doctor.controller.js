@@ -1,18 +1,24 @@
+// Doctor CRUD controller for the simplified demo schema.
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
+
+const doctorProjection = `
+  SELECT d.DoctorID, d.UserID, u.FullName, u.Email, u.Phone,
+         d.DepartmentID, dep.DepartmentName,
+         d.Specialization, d.Qualification, d.Designation, d.ConsultationFee,
+         d.ShiftStartTime, d.ShiftEndTime, d.WorkDays,
+         CAST(1 AS bit) AS AvailableForOPD,
+         CAST(1 AS bit) AS AvailableForIPD,
+         dep.DepartmentName AS Departments
+  FROM Doctors d
+  INNER JOIN Users u ON u.UserID = d.UserID
+  LEFT JOIN Departments dep ON dep.DepartmentID = d.DepartmentID
+`;
 
 const listDoctors = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const result = await pool.request().query(`
-    SELECT d.DoctorID, u.FullName, u.Email, u.Phone, d.Specialization,
-           d.Designation, d.ConsultationFee, d.AvailableForOPD, d.AvailableForIPD,
-           STRING_AGG(dep.DepartmentName, ', ') AS Departments
-    FROM Doctors d
-    INNER JOIN Users u ON u.UserID = d.UserID
-    LEFT JOIN DoctorDepartments dd ON dd.DoctorID = d.DoctorID
-    LEFT JOIN Departments dep ON dep.DepartmentID = dd.DepartmentID
-    WHERE u.IsActive = 1
-    GROUP BY d.DoctorID, u.FullName, u.Email, u.Phone, d.Specialization, d.Designation, d.ConsultationFee, d.AvailableForOPD, d.AvailableForIPD
+    ${doctorProjection}
     ORDER BY u.FullName
   `);
   res.json(result.recordset);
@@ -20,130 +26,81 @@ const listDoctors = asyncHandler(async (req, res) => {
 
 const getDoctor = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const doctor = await pool
-    .request()
+  const result = await pool.request()
     .input("DoctorID", sql.Int, req.params.id)
-    .query(`
-      SELECT d.*, u.FullName, u.Email, u.Phone, u.Address
-      FROM Doctors d
-      INNER JOIN Users u ON u.UserID = d.UserID
-      WHERE d.DoctorID = @DoctorID
-    `);
+    .query(`${doctorProjection} WHERE d.DoctorID = @DoctorID`);
 
-  if (!doctor.recordset[0]) {
-    return res.status(404).json({ message: "Doctor not found" });
-  }
-
-  res.json(doctor.recordset[0]);
+  if (!result.recordset[0]) return res.status(404).json({ message: "Doctor not found" });
+  res.json(result.recordset[0]);
 });
 
 const createDoctor = asyncHandler(async (req, res) => {
-  const {
-    userId,
-    specialization,
-    qualification,
-    designation,
-    licenseNumber,
-    experienceYears,
-    consultationFee,
-    availableForOPD,
-    availableForIPD
-  } = req.body;
-
-  if (!userId || !specialization || !licenseNumber) {
-    return res.status(400).json({ message: "User, specialization, and license number are required" });
-  }
-
+  const { userId, departmentId, specialization, qualification, designation, consultationFee, shiftStartTime, shiftEndTime, workDays } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("UserID", sql.Int, userId)
+    .input("DepartmentID", sql.Int, departmentId || null)
     .input("Specialization", sql.NVarChar(100), specialization)
     .input("Qualification", sql.NVarChar(150), qualification || null)
     .input("Designation", sql.NVarChar(100), designation || null)
-    .input("LicenseNumber", sql.NVarChar(80), licenseNumber)
-    .input("ExperienceYears", sql.Int, experienceYears || 0)
-    .input("ConsultationFee", sql.Decimal(10, 2), consultationFee || 0)
-    .input("AvailableForOPD", sql.Bit, availableForOPD === undefined ? true : Boolean(availableForOPD))
-    .input("AvailableForIPD", sql.Bit, availableForIPD === undefined ? false : Boolean(availableForIPD))
+    .input("ConsultationFee", sql.Decimal(10, 2), Number(consultationFee || 0))
+    .input("ShiftStartTime", sql.NVarChar(8), `${shiftStartTime || "09:00"}:00`)
+    .input("ShiftEndTime", sql.NVarChar(8), `${shiftEndTime || "17:00"}:00`)
+    .input("WorkDays", sql.NVarChar(50), workDays || "1,2,3,4,5")
     .query(`
-      INSERT INTO Doctors
-        (UserID, Specialization, Qualification, Designation, LicenseNumber, ExperienceYears,
-         ConsultationFee, AvailableForOPD, AvailableForIPD)
+      INSERT INTO Doctors (UserID, DepartmentID, Specialization, Qualification, Designation, ConsultationFee, ShiftStartTime, ShiftEndTime, WorkDays)
       OUTPUT INSERTED.*
-      VALUES
-        (@UserID, @Specialization, @Qualification, @Designation, @LicenseNumber, @ExperienceYears,
-         @ConsultationFee, @AvailableForOPD, @AvailableForIPD)
+      VALUES (@UserID, @DepartmentID, @Specialization, @Qualification, @Designation, @ConsultationFee, @ShiftStartTime, @ShiftEndTime, @WorkDays)
     `);
 
   res.status(201).json(result.recordset[0]);
 });
 
 const updateDoctor = asyncHandler(async (req, res) => {
-  const {
-    specialization,
-    qualification,
-    designation,
-    licenseNumber,
-    experienceYears,
-    consultationFee,
-    availableForOPD,
-    availableForIPD
-  } = req.body;
-
-  if (!specialization || !licenseNumber) {
-    return res.status(400).json({ message: "Specialization and license number are required" });
-  }
-
+  const { departmentId, specialization, qualification, designation, consultationFee, shiftStartTime, shiftEndTime, workDays } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("DoctorID", sql.Int, req.params.id)
+    .input("DepartmentID", sql.Int, departmentId || null)
     .input("Specialization", sql.NVarChar(100), specialization)
     .input("Qualification", sql.NVarChar(150), qualification || null)
     .input("Designation", sql.NVarChar(100), designation || null)
-    .input("LicenseNumber", sql.NVarChar(80), licenseNumber)
-    .input("ExperienceYears", sql.Int, experienceYears || 0)
-    .input("ConsultationFee", sql.Decimal(10, 2), consultationFee || 0)
-    .input("AvailableForOPD", sql.Bit, availableForOPD === undefined ? true : Boolean(availableForOPD))
-    .input("AvailableForIPD", sql.Bit, availableForIPD === undefined ? false : Boolean(availableForIPD))
+    .input("ConsultationFee", sql.Decimal(10, 2), Number(consultationFee || 0))
+    .input("ShiftStartTime", sql.NVarChar(8), `${shiftStartTime || "09:00"}:00`)
+    .input("ShiftEndTime", sql.NVarChar(8), `${shiftEndTime || "17:00"}:00`)
+    .input("WorkDays", sql.NVarChar(50), workDays || "1,2,3,4,5")
     .query(`
       UPDATE Doctors
-      SET Specialization = @Specialization,
+      SET DepartmentID = @DepartmentID,
+          Specialization = @Specialization,
           Qualification = @Qualification,
           Designation = @Designation,
-          LicenseNumber = @LicenseNumber,
-          ExperienceYears = @ExperienceYears,
           ConsultationFee = @ConsultationFee,
-          AvailableForOPD = @AvailableForOPD,
-          AvailableForIPD = @AvailableForIPD
+          ShiftStartTime = @ShiftStartTime,
+          ShiftEndTime = @ShiftEndTime,
+          WorkDays = @WorkDays
       OUTPUT INSERTED.*
       WHERE DoctorID = @DoctorID
     `);
 
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Doctor not found" });
-  }
-
+  if (!result.recordset[0]) return res.status(404).json({ message: "Doctor not found" });
   res.json(result.recordset[0]);
 });
 
 const deleteDoctor = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("DoctorID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM Doctors
-      OUTPUT DELETED.*
-      WHERE DoctorID = @DoctorID
-    `);
+    .query("DELETE FROM Doctors OUTPUT DELETED.DoctorID WHERE DoctorID = @DoctorID");
 
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Doctor not found" });
-  }
-
-  res.json(result.recordset[0]);
+  if (!result.recordset[0]) return res.status(404).json({ message: "Doctor not found" });
+  res.json({ message: "Doctor deleted" });
 });
 
-module.exports = { listDoctors, getDoctor, createDoctor, updateDoctor, deleteDoctor };
+module.exports = {
+  listDoctors,
+  getDoctor,
+  createDoctor,
+  updateDoctor,
+  deleteDoctor
+};

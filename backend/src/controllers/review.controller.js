@@ -1,3 +1,4 @@
+// Patient review CRUD endpoints.
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
 

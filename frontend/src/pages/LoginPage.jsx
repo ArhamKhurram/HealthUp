@@ -1,3 +1,4 @@
+// Login and patient self-signup UI/validation flow.
 import React, { useState } from "react";
 import { HeartPulse, LogIn, UserPlus } from "lucide-react";
 import { useAuth } from "../context/AuthContext";

@@ -1,3 +1,4 @@
+// Patient review routes.
 const router = require("express").Router();
 const { listReviews, getReview, createReview, updateReview, deleteReview } = require("../controllers/review.controller");
 const { requireAuth, requireRole } = require("../middleware/auth");

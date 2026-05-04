@@ -1,3 +1,4 @@
+// JWT authentication and role-authorization middleware.
 const jwt = require("jsonwebtoken");
 
 function requireAuth(req, res, next) {
@@ -26,4 +27,3 @@ function requireRole(...roles) {
 }
 
 module.exports = { requireAuth, requireRole };
-

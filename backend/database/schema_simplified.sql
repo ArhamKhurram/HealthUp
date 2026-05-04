@@ -1,12 +1,44 @@
 USE HealthUp;
 GO
 
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+GO
+
 /* =========================
    HealthUp Simplified Schema
    Phase 2 (From Scratch)
    ========================= */
 
+/* Drop every FK first so resets work even when legacy tables from older phases still exist. */
+DECLARE @dropFkSql NVARCHAR(MAX) = N'';
+SELECT @dropFkSql += N'ALTER TABLE ' + QUOTENAME(OBJECT_SCHEMA_NAME(parent_object_id)) + N'.' + QUOTENAME(OBJECT_NAME(parent_object_id)) +
+                     N' DROP CONSTRAINT ' + QUOTENAME(name) + N';' + CHAR(13)
+FROM sys.foreign_keys;
+EXEC sp_executesql @dropFkSql;
+GO
+
 /* Drop in dependency-safe order */
+IF OBJECT_ID('IPDBillingDetails', 'U') IS NOT NULL DROP TABLE IPDBillingDetails;
+IF OBJECT_ID('OPDBillingDetails', 'U') IS NOT NULL DROP TABLE OPDBillingDetails;
+IF OBJECT_ID('IPDPayments', 'U') IS NOT NULL DROP TABLE IPDPayments;
+IF OBJECT_ID('OPDPayments', 'U') IS NOT NULL DROP TABLE OPDPayments;
+IF OBJECT_ID('IPDTestOrders', 'U') IS NOT NULL DROP TABLE IPDTestOrders;
+IF OBJECT_ID('OPDTestOrders', 'U') IS NOT NULL DROP TABLE OPDTestOrders;
+IF OBJECT_ID('IPDPrescriptionMedications', 'U') IS NOT NULL DROP TABLE IPDPrescriptionMedications;
+IF OBJECT_ID('OPDPrescriptionMedications', 'U') IS NOT NULL DROP TABLE OPDPrescriptionMedications;
+IF OBJECT_ID('IPDPrescriptions', 'U') IS NOT NULL DROP TABLE IPDPrescriptions;
+IF OBJECT_ID('OPDPrescriptions', 'U') IS NOT NULL DROP TABLE OPDPrescriptions;
+IF OBJECT_ID('DoctorSchedules', 'U') IS NOT NULL DROP TABLE DoctorSchedules;
+IF OBJECT_ID('DoctorDepartments', 'U') IS NOT NULL DROP TABLE DoctorDepartments;
+IF OBJECT_ID('DoctorQualifications', 'U') IS NOT NULL DROP TABLE DoctorQualifications;
+IF OBJECT_ID('DutyRoster', 'U') IS NOT NULL DROP TABLE DutyRoster;
+IF OBJECT_ID('HospitalEquipment', 'U') IS NOT NULL DROP TABLE HospitalEquipment;
+IF OBJECT_ID('Beds', 'U') IS NOT NULL DROP TABLE Beds;
+IF OBJECT_ID('Wards', 'U') IS NOT NULL DROP TABLE Wards;
+IF OBJECT_ID('OPDRooms', 'U') IS NOT NULL DROP TABLE OPDRooms;
+IF OBJECT_ID('OTRooms', 'U') IS NOT NULL DROP TABLE OTRooms;
+IF OBJECT_ID('SurgeryBookings', 'U') IS NOT NULL DROP TABLE SurgeryBookings;
 IF OBJECT_ID('BillingDetails', 'U') IS NOT NULL DROP TABLE BillingDetails;
 IF OBJECT_ID('Payments', 'U') IS NOT NULL DROP TABLE Payments;
 IF OBJECT_ID('TestOrders', 'U') IS NOT NULL DROP TABLE TestOrders;

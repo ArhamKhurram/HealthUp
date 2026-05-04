@@ -1,3 +1,4 @@
+// Auth routes: login, patient registration, current user profile.
 const router = require("express").Router();
 const { login, registerPatient, me } = require("../controllers/auth.controller");
 const { requireAuth } = require("../middleware/auth");

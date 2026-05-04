@@ -1,486 +1,307 @@
+// IPD controller for the simplified admissions model.
+// Bed and ward tables were removed; each admission now stores DepartmentID, DoctorID, and a simple BedNumber.
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
 
-const getActorContext = async (pool, userId) => {
-  const result = await pool
-    .request()
-    .input("UserID", sql.Int, userId)
-    .query(`
-      SELECT
-        (SELECT TOP 1 PatientID FROM Patients WHERE UserID = @UserID) AS PatientID,
-        (SELECT TOP 1 DoctorID FROM Doctors WHERE UserID = @UserID) AS DoctorID
-    `);
-  return result.recordset[0] || { PatientID: null, DoctorID: null };
-};
+function admissionSelect(whereClause = "") {
+  return `
+    SELECT a.AdmissionID, a.PatientID, a.DoctorID, a.DepartmentID,
+           a.AdmissionDate, a.DischargeDate, a.Status, a.BedNumber, a.Diagnosis,
+           a.DoctorID AS AttendingDoctorID,
+           a.DepartmentID AS WardID,
+           CAST(NULL AS int) AS BedID,
+           'General' AS AdmissionType,
+           a.Diagnosis AS ClinicalDiagnosis,
+           p.MRNumber,
+           pu.FullName AS PatientName,
+           du.FullName AS DoctorName,
+           dep.DepartmentName,
+           dep.DepartmentName AS WardName
+    FROM IPDAdmissions a
+    INNER JOIN Patients p ON p.PatientID = a.PatientID
+    INNER JOIN Users pu ON pu.UserID = p.UserID
+    INNER JOIN Doctors d ON d.DoctorID = a.DoctorID
+    INNER JOIN Users du ON du.UserID = d.UserID
+    INNER JOIN Departments dep ON dep.DepartmentID = a.DepartmentID
+    ${whereClause}
+  `;
+}
 
-const validateDoctorWardAssignment = async (pool, attendingDoctorId, wardId) => {
-  const doctorWardValidation = await pool
-    .request()
-    .input("AttendingDoctorID", sql.Int, attendingDoctorId)
-    .input("WardID", sql.Int, wardId)
-    .query(`
-      SELECT d.DoctorID
-      FROM Doctors d
-      INNER JOIN Users u ON u.UserID = d.UserID
-      INNER JOIN Wards w ON w.WardID = @WardID
-      WHERE d.DoctorID = @AttendingDoctorID
-        AND u.IsActive = 1
-        AND (
-          NOT EXISTS (SELECT 1 FROM DoctorDepartments dd WHERE dd.DoctorID = d.DoctorID)
-          OR EXISTS (
-            SELECT 1
-            FROM DoctorDepartments dd
-            WHERE dd.DoctorID = d.DoctorID AND dd.DepartmentID = w.DepartmentID
-          )
-        )
-    `);
+async function actorContext(pool, req) {
+  if (req.user?.role === "Patient") {
+    const patient = await pool.request()
+      .input("UserID", sql.Int, req.user.userId)
+      .query("SELECT PatientID FROM Patients WHERE UserID = @UserID");
+    return { patientId: patient.recordset[0]?.PatientID || null, doctorId: null };
+  }
 
-  return Boolean(doctorWardValidation.recordset[0]);
-};
+  if (req.user?.role === "Doctor") {
+    const doctor = await pool.request()
+      .input("UserID", sql.Int, req.user.userId)
+      .query("SELECT DoctorID FROM Doctors WHERE UserID = @UserID");
+    return { patientId: null, doctorId: doctor.recordset[0]?.DoctorID || null };
+  }
 
-const getBedInWard = async (pool, bedId, wardId) => {
-  const bedResult = await pool
-    .request()
-    .input("BedID", sql.Int, bedId)
-    .input("WardID", sql.Int, wardId)
-    .query(`
-      SELECT BedID, WardID, Status
-      FROM Beds
-      WHERE BedID = @BedID AND WardID = @WardID
-    `);
+  return { patientId: null, doctorId: null };
+}
 
-  return bedResult.recordset[0] || null;
-};
+function normalizeAdmissionBody(body) {
+  return {
+    patientId: Number(body.patientId),
+    doctorId: Number(body.doctorId || body.attendingDoctorId),
+    departmentId: Number(body.departmentId || body.wardId),
+    bedNumber: body.bedNumber || (body.bedId ? `BED-${body.bedId}` : null),
+    diagnosis: body.diagnosis || body.clinicalDiagnosis || null,
+    status: body.status || "Admitted",
+    dischargeDate: body.dischargeDate || null
+  };
+}
 
 const listAdmissions = asyncHandler(async (req, res) => {
   const pool = await getPool();
+  const actor = await actorContext(pool, req);
   const request = pool.request();
   let whereClause = "";
+
   if (req.user.role === "Patient") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, actor.PatientID);
-    whereClause = "WHERE a.PatientID = @ActorPatientID";
+    request.input("PatientID", sql.Int, actor.patientId);
+    whereClause = "WHERE a.PatientID = @PatientID";
   } else if (req.user.role === "Doctor") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
-    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
-    whereClause = "WHERE a.AttendingDoctorID = @ActorDoctorID";
+    request.input("DoctorID", sql.Int, actor.doctorId);
+    whereClause = "WHERE a.DoctorID = @DoctorID";
   }
-  const result = await request.query(`
-    SELECT a.AdmissionID, a.AdmissionDate, a.DischargeDate, a.AdmissionType,
-           a.Status, a.ClinicalDiagnosis, p.MRNumber,
-           a.PatientID, a.AttendingDoctorID, a.BedID, a.WardID,
-           patientUser.FullName AS PatientName, doctorUser.FullName AS DoctorName,
-           w.WardName, b.BedNumber
-    FROM IPDAdmissions a
-    INNER JOIN Patients p ON p.PatientID = a.PatientID
-    INNER JOIN Users patientUser ON patientUser.UserID = p.UserID
-    INNER JOIN Doctors d ON d.DoctorID = a.AttendingDoctorID
-    INNER JOIN Users doctorUser ON doctorUser.UserID = d.UserID
-    INNER JOIN Wards w ON w.WardID = a.WardID
-    INNER JOIN Beds b ON b.BedID = a.BedID
-    ${whereClause}
-    ORDER BY a.AdmissionDate DESC
-  `);
+
+  const result = await request.query(`${admissionSelect(whereClause)} ORDER BY a.AdmissionDate DESC`);
   res.json(result.recordset);
 });
 
 const getAdmission = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const request = pool.request().input("AdmissionID", sql.Int, req.params.id);
-  let whereClause = "WHERE AdmissionID = @AdmissionID";
-  if (req.user.role === "Patient") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, actor.PatientID);
-    whereClause += " AND PatientID = @ActorPatientID";
-  } else if (req.user.role === "Doctor") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
-    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
-    whereClause += " AND AttendingDoctorID = @ActorDoctorID";
-  }
-  const result = await request.query(`
-      SELECT *
-      FROM IPDAdmissions
-      ${whereClause}
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Admission not found" });
-  }
-
+  const result = await pool.request()
+    .input("AdmissionID", sql.Int, req.params.id)
+    .query(`${admissionSelect("WHERE a.AdmissionID = @AdmissionID")}`);
+  if (!result.recordset[0]) return res.status(404).json({ message: "Admission not found" });
   res.json(result.recordset[0]);
 });
 
 const createAdmission = asyncHandler(async (req, res) => {
-  const { patientId, attendingDoctorId, bedId, wardId, admissionType, clinicalDiagnosis } = req.body;
-
-  if (!patientId || !attendingDoctorId || !bedId || !wardId || !admissionType) {
-    return res.status(400).json({ message: "Patient, doctor, bed, ward, and admission type are required" });
+  const body = normalizeAdmissionBody(req.body);
+  if (!body.patientId || !body.doctorId || !body.departmentId || !body.bedNumber) {
+    return res.status(400).json({ message: "patientId, doctorId, departmentId, and bedNumber are required" });
   }
 
   const pool = await getPool();
-  const isDoctorAssignable = await validateDoctorWardAssignment(pool, attendingDoctorId, wardId);
-  if (!isDoctorAssignable) {
-    return res.status(400).json({ message: "Attending doctor must be active and assigned to the selected ward department." });
-  }
-  const bed = await getBedInWard(pool, bedId, wardId);
-  if (!bed) {
-    return res.status(400).json({ message: "Selected bed must belong to the selected ward." });
-  }
-  if (bed.Status !== "Available") {
-    return res.status(400).json({ message: "Bed is not available for admission." });
-  }
-
-  const created = await pool
-    .request()
-    .input("PatientID", sql.Int, patientId)
-    .input("AttendingDoctorID", sql.Int, attendingDoctorId)
-    .input("BedID", sql.Int, bedId)
-    .input("WardID", sql.Int, wardId)
-    .input("AdmissionType", sql.NVarChar(50), admissionType)
-    .input("ClinicalDiagnosis", sql.NVarChar(sql.MAX), clinicalDiagnosis || null)
+  const result = await pool.request()
+    .input("PatientID", sql.Int, body.patientId)
+    .input("DoctorID", sql.Int, body.doctorId)
+    .input("DepartmentID", sql.Int, body.departmentId)
+    .input("BedNumber", sql.NVarChar(30), body.bedNumber)
+    .input("Diagnosis", sql.NVarChar(sql.MAX), body.diagnosis)
     .query(`
-      EXEC sp_AdmitPatientTransactional
-        @PatientID = @PatientID,
-        @AttendingDoctorID = @AttendingDoctorID,
-        @BedID = @BedID,
-        @WardID = @WardID,
-        @AdmissionType = @AdmissionType,
-        @ClinicalDiagnosis = @ClinicalDiagnosis
+      INSERT INTO IPDAdmissions (PatientID, DoctorID, DepartmentID, BedNumber, Diagnosis, Status)
+      OUTPUT INSERTED.*
+      VALUES (@PatientID, @DoctorID, @DepartmentID, @BedNumber, @Diagnosis, 'Admitted')
     `);
-
-  const admissionId = created.recordset[0]?.AdmissionID;
-  const result = await pool
-    .request()
-    .input("AdmissionID", sql.Int, admissionId)
-    .query("SELECT * FROM IPDAdmissions WHERE AdmissionID = @AdmissionID");
-
   res.status(201).json(result.recordset[0]);
 });
 
 const updateAdmission = asyncHandler(async (req, res) => {
-  const {
-    patientId,
-    attendingDoctorId,
-    bedId,
-    wardId,
-    admissionDate,
-    dischargeDate,
-    admissionType,
-    status,
-    clinicalDiagnosis
-  } = req.body;
-
-  if (!patientId || !attendingDoctorId || !bedId || !wardId || !admissionType) {
-    return res.status(400).json({ message: "Patient, doctor, bed, ward, and admission type are required" });
-  }
+  const body = normalizeAdmissionBody(req.body);
+  if (!["Admitted", "Discharged"].includes(body.status)) return res.status(400).json({ message: "Invalid admission status" });
 
   const pool = await getPool();
-  const existingAdmissionResult = await pool
-    .request()
+  const existing = await pool.request()
     .input("AdmissionID", sql.Int, req.params.id)
-    .query(`
-      SELECT AdmissionID, BedID
-      FROM IPDAdmissions
-      WHERE AdmissionID = @AdmissionID
-    `);
-  const existingAdmission = existingAdmissionResult.recordset[0];
-  if (!existingAdmission) {
-    return res.status(404).json({ message: "Admission not found" });
-  }
+    .query("SELECT * FROM IPDAdmissions WHERE AdmissionID = @AdmissionID");
+  if (!existing.recordset[0]) return res.status(404).json({ message: "Admission not found" });
 
-  const isDoctorAssignable = await validateDoctorWardAssignment(pool, attendingDoctorId, wardId);
-  if (!isDoctorAssignable) {
-    return res.status(400).json({ message: "Attending doctor must be active and assigned to the selected ward department." });
-  }
-  const bed = await getBedInWard(pool, bedId, wardId);
-  if (!bed) {
-    return res.status(400).json({ message: "Selected bed must belong to the selected ward." });
-  }
-  const isSameBed = Number(existingAdmission.BedID) === Number(bedId);
-  if (!isSameBed && bed.Status !== "Available") {
-    return res.status(400).json({ message: "Selected bed is not available." });
-  }
-
-  const result = await pool
-    .request()
+  const previous = existing.recordset[0];
+  const result = await pool.request()
     .input("AdmissionID", sql.Int, req.params.id)
-    .input("PatientID", sql.Int, patientId)
-    .input("AttendingDoctorID", sql.Int, attendingDoctorId)
-    .input("BedID", sql.Int, bedId)
-    .input("WardID", sql.Int, wardId)
-    .input("AdmissionDate", sql.DateTime2, admissionDate || null)
-    .input("DischargeDate", sql.DateTime2, dischargeDate || null)
-    .input("AdmissionType", sql.NVarChar(50), admissionType)
-    .input("Status", sql.NVarChar(30), status || "Admitted")
-    .input("ClinicalDiagnosis", sql.NVarChar(sql.MAX), clinicalDiagnosis || null)
+    .input("PatientID", sql.Int, body.patientId || previous.PatientID)
+    .input("DoctorID", sql.Int, body.doctorId || previous.DoctorID)
+    .input("DepartmentID", sql.Int, body.departmentId || previous.DepartmentID)
+    .input("BedNumber", sql.NVarChar(30), body.bedNumber || previous.BedNumber)
+    .input("Diagnosis", sql.NVarChar(sql.MAX), body.diagnosis ?? previous.Diagnosis)
+    .input("Status", sql.NVarChar(30), body.status || previous.Status)
+    .input("DischargeDate", sql.DateTime2, body.dischargeDate ? new Date(body.dischargeDate) : previous.DischargeDate)
     .query(`
       UPDATE IPDAdmissions
       SET PatientID = @PatientID,
-          AttendingDoctorID = @AttendingDoctorID,
-          BedID = @BedID,
-          WardID = @WardID,
-          AdmissionDate = COALESCE(@AdmissionDate, AdmissionDate),
-          DischargeDate = @DischargeDate,
-          AdmissionType = @AdmissionType,
+          DoctorID = @DoctorID,
+          DepartmentID = @DepartmentID,
+          BedNumber = @BedNumber,
+          Diagnosis = @Diagnosis,
           Status = @Status,
-          ClinicalDiagnosis = @ClinicalDiagnosis
+          DischargeDate = CASE WHEN @Status = 'Discharged' THEN COALESCE(@DischargeDate, SYSDATETIME()) ELSE @DischargeDate END
       OUTPUT INSERTED.*
       WHERE AdmissionID = @AdmissionID
     `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Admission not found" });
-  }
-
-  if (!isSameBed) {
-    await pool
-      .request()
-      .input("PreviousBedID", sql.Int, existingAdmission.BedID)
-      .query(`
-        UPDATE Beds
-        SET Status = 'Available'
-        WHERE BedID = @PreviousBedID
-      `);
-  }
-
   res.json(result.recordset[0]);
 });
 
 const deleteAdmission = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("AdmissionID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM IPDAdmissions
-      OUTPUT DELETED.*
-      WHERE AdmissionID = @AdmissionID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Admission not found" });
-  }
-
-  res.json(result.recordset[0]);
+    .query("DELETE FROM IPDAdmissions OUTPUT DELETED.AdmissionID WHERE AdmissionID = @AdmissionID");
+  if (!result.recordset[0]) return res.status(404).json({ message: "Admission not found" });
+  res.json({ message: "Admission deleted" });
 });
+
+function prescriptionSelect(whereClause = "WHERE pr.AdmissionID IS NOT NULL") {
+  return `
+    SELECT pr.PrescriptionID, pr.PatientID, pr.DoctorID, pr.AdmissionID, pr.PrescriptionDate,
+           pr.Diagnosis, pr.Notes,
+           pu.FullName AS PatientName, du.FullName AS DoctorName,
+           meds.MedicationName, meds.Dosage, meds.Frequency
+    FROM Prescriptions pr
+    INNER JOIN Patients p ON p.PatientID = pr.PatientID
+    INNER JOIN Users pu ON pu.UserID = p.UserID
+    INNER JOIN Doctors d ON d.DoctorID = pr.DoctorID
+    INNER JOIN Users du ON du.UserID = d.UserID
+    OUTER APPLY (
+      SELECT
+        STRING_AGG(m.MedicationName, ', ') AS MedicationName,
+        STRING_AGG(pm.Dosage, ', ') AS Dosage,
+        STRING_AGG(pm.Frequency, ', ') AS Frequency
+      FROM PrescriptionMedications pm
+      INNER JOIN Medications m ON m.MedicationID = pm.MedicationID
+      WHERE pm.PrescriptionID = pr.PrescriptionID
+    ) meds
+    ${whereClause}
+  `;
+}
 
 const listPrescriptions = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool.request().query(`
-    SELECT pr.PrescriptionID, pr.AdmissionID, pr.PatientID, pr.DoctorID,
-           pr.PrescriptionDate, pr.Diagnosis,
-           patientUser.FullName AS PatientName, doctorUser.FullName AS DoctorName
-    FROM IPDPrescriptions pr
-    INNER JOIN Patients p ON p.PatientID = pr.PatientID
-    INNER JOIN Users patientUser ON patientUser.UserID = p.UserID
-    INNER JOIN Doctors d ON d.DoctorID = pr.DoctorID
-    INNER JOIN Users doctorUser ON doctorUser.UserID = d.UserID
-    ORDER BY pr.PrescriptionID DESC
-  `);
-
+  const result = await pool.request().query(`${prescriptionSelect()} ORDER BY pr.PrescriptionDate DESC`);
   res.json(result.recordset);
 });
 
 const getPrescription = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionID", sql.Int, req.params.id)
-    .query(`
-      SELECT *
-      FROM IPDPrescriptions
-      WHERE PrescriptionID = @PrescriptionID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription not found" });
-  }
-
+    .query(`${prescriptionSelect("WHERE pr.PrescriptionID = @PrescriptionID AND pr.AdmissionID IS NOT NULL")}`);
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription not found" });
   res.json(result.recordset[0]);
 });
 
 const createPrescription = asyncHandler(async (req, res) => {
-  const { admissionId, patientId, doctorId, prescriptionDate, diagnosis } = req.body;
-
-  if (!admissionId || !patientId || !doctorId) {
-    return res.status(400).json({ message: "Admission, patient, and doctor are required" });
-  }
-
+  const { admissionId, patientId, doctorId, diagnosis, notes } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("AdmissionID", sql.Int, admissionId)
     .input("PatientID", sql.Int, patientId)
     .input("DoctorID", sql.Int, doctorId)
-    .input("PrescriptionDate", sql.Date, prescriptionDate || null)
     .input("Diagnosis", sql.NVarChar(sql.MAX), diagnosis || null)
+    .input("Notes", sql.NVarChar(sql.MAX), notes || null)
     .query(`
-      INSERT INTO IPDPrescriptions (AdmissionID, PatientID, DoctorID, PrescriptionDate, Diagnosis)
+      INSERT INTO Prescriptions (AdmissionID, PatientID, DoctorID, Diagnosis, Notes)
       OUTPUT INSERTED.*
-      VALUES (@AdmissionID, @PatientID, @DoctorID, COALESCE(@PrescriptionDate, CONVERT(DATE, GETDATE())), @Diagnosis)
+      VALUES (@AdmissionID, @PatientID, @DoctorID, @Diagnosis, @Notes)
     `);
-
   res.status(201).json(result.recordset[0]);
 });
 
 const updatePrescription = asyncHandler(async (req, res) => {
-  const { admissionId, patientId, doctorId, prescriptionDate, diagnosis } = req.body;
-
-  if (!admissionId || !patientId || !doctorId) {
-    return res.status(400).json({ message: "Admission, patient, and doctor are required" });
-  }
-
+  const { diagnosis, notes } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionID", sql.Int, req.params.id)
-    .input("AdmissionID", sql.Int, admissionId)
-    .input("PatientID", sql.Int, patientId)
-    .input("DoctorID", sql.Int, doctorId)
-    .input("PrescriptionDate", sql.Date, prescriptionDate || null)
     .input("Diagnosis", sql.NVarChar(sql.MAX), diagnosis || null)
+    .input("Notes", sql.NVarChar(sql.MAX), notes || null)
     .query(`
-      UPDATE IPDPrescriptions
-      SET AdmissionID = @AdmissionID,
-          PatientID = @PatientID,
-          DoctorID = @DoctorID,
-          PrescriptionDate = COALESCE(@PrescriptionDate, PrescriptionDate),
-          Diagnosis = @Diagnosis
+      UPDATE Prescriptions
+      SET Diagnosis = @Diagnosis, Notes = @Notes
       OUTPUT INSERTED.*
-      WHERE PrescriptionID = @PrescriptionID
+      WHERE PrescriptionID = @PrescriptionID AND AdmissionID IS NOT NULL
     `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription not found" });
-  }
-
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription not found" });
   res.json(result.recordset[0]);
 });
 
 const deletePrescription = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM IPDPrescriptions
-      OUTPUT DELETED.*
-      WHERE PrescriptionID = @PrescriptionID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription not found" });
-  }
-
-  res.json(result.recordset[0]);
+    .query("DELETE FROM Prescriptions OUTPUT DELETED.PrescriptionID WHERE PrescriptionID = @PrescriptionID AND AdmissionID IS NOT NULL");
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription not found" });
+  res.json({ message: "Prescription deleted" });
 });
 
 const listPrescriptionMedications = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const result = await pool.request().query(`
-    SELECT pm.PrescriptionMedicationID, pm.PrescriptionID, pm.MedicationID,
-           pm.Dosage, pm.Frequency, m.MedicationName
-    FROM IPDPrescriptionMedications pm
+    SELECT pm.*, m.MedicationName, pr.AdmissionID
+    FROM PrescriptionMedications pm
+    INNER JOIN Prescriptions pr ON pr.PrescriptionID = pm.PrescriptionID
     INNER JOIN Medications m ON m.MedicationID = pm.MedicationID
+    WHERE pr.AdmissionID IS NOT NULL
     ORDER BY pm.PrescriptionMedicationID DESC
   `);
-
   res.json(result.recordset);
 });
 
 const getPrescriptionMedication = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionMedicationID", sql.Int, req.params.id)
-    .query(`
-      SELECT *
-      FROM IPDPrescriptionMedications
-      WHERE PrescriptionMedicationID = @PrescriptionMedicationID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription medication not found" });
-  }
-
+    .query("SELECT * FROM PrescriptionMedications WHERE PrescriptionMedicationID = @PrescriptionMedicationID");
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription medication not found" });
   res.json(result.recordset[0]);
 });
 
 const createPrescriptionMedication = asyncHandler(async (req, res) => {
-  const { prescriptionId, medicationId, dosage, frequency } = req.body;
-
-  if (!prescriptionId || !medicationId || !dosage || !frequency) {
-    return res.status(400).json({ message: "Prescription, medication, dosage, and frequency are required" });
-  }
-
+  const { prescriptionId, medicationId, dosage, frequency, durationDays, instructions } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionID", sql.Int, prescriptionId)
     .input("MedicationID", sql.Int, medicationId)
-    .input("Dosage", sql.NVarChar(80), dosage)
-    .input("Frequency", sql.NVarChar(80), frequency)
+    .input("Dosage", sql.NVarChar(80), dosage || null)
+    .input("Frequency", sql.NVarChar(100), frequency || null)
+    .input("DurationDays", sql.Int, durationDays || null)
+    .input("Instructions", sql.NVarChar(sql.MAX), instructions || null)
     .query(`
-      INSERT INTO IPDPrescriptionMedications (PrescriptionID, MedicationID, Dosage, Frequency)
+      INSERT INTO PrescriptionMedications (PrescriptionID, MedicationID, Dosage, Frequency, DurationDays, Instructions)
       OUTPUT INSERTED.*
-      VALUES (@PrescriptionID, @MedicationID, @Dosage, @Frequency)
+      VALUES (@PrescriptionID, @MedicationID, @Dosage, @Frequency, @DurationDays, @Instructions)
     `);
-
   res.status(201).json(result.recordset[0]);
 });
 
 const updatePrescriptionMedication = asyncHandler(async (req, res) => {
-  const { prescriptionId, medicationId, dosage, frequency } = req.body;
-
-  if (!prescriptionId || !medicationId || !dosage || !frequency) {
-    return res.status(400).json({ message: "Prescription, medication, dosage, and frequency are required" });
-  }
-
+  const { medicationId, dosage, frequency, durationDays, instructions } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionMedicationID", sql.Int, req.params.id)
-    .input("PrescriptionID", sql.Int, prescriptionId)
     .input("MedicationID", sql.Int, medicationId)
-    .input("Dosage", sql.NVarChar(80), dosage)
-    .input("Frequency", sql.NVarChar(80), frequency)
+    .input("Dosage", sql.NVarChar(80), dosage || null)
+    .input("Frequency", sql.NVarChar(100), frequency || null)
+    .input("DurationDays", sql.Int, durationDays || null)
+    .input("Instructions", sql.NVarChar(sql.MAX), instructions || null)
     .query(`
-      UPDATE IPDPrescriptionMedications
-      SET PrescriptionID = @PrescriptionID,
-          MedicationID = @MedicationID,
+      UPDATE PrescriptionMedications
+      SET MedicationID = @MedicationID,
           Dosage = @Dosage,
-          Frequency = @Frequency
+          Frequency = @Frequency,
+          DurationDays = @DurationDays,
+          Instructions = @Instructions
       OUTPUT INSERTED.*
       WHERE PrescriptionMedicationID = @PrescriptionMedicationID
     `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription medication not found" });
-  }
-
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription medication not found" });
   res.json(result.recordset[0]);
 });
 
 const deletePrescriptionMedication = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionMedicationID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM IPDPrescriptionMedications
-      OUTPUT DELETED.*
-      WHERE PrescriptionMedicationID = @PrescriptionMedicationID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription medication not found" });
-  }
-
-  res.json(result.recordset[0]);
+    .query("DELETE FROM PrescriptionMedications OUTPUT DELETED.PrescriptionMedicationID WHERE PrescriptionMedicationID = @PrescriptionMedicationID");
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription medication not found" });
+  res.json({ message: "Prescription medication deleted" });
 });
 
 module.exports = {

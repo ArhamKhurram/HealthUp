@@ -1,3 +1,4 @@
+// Express app composition: middleware, CORS, API routes, and error handling.
 const express = require("express");
 const cors = require("cors");
 

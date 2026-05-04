@@ -1,3 +1,4 @@
+// Medical test and test-order routes for OPD/IPD.
 const router = require("express").Router();
 const {
   listMedicalTests,

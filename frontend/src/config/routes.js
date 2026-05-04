@@ -1,3 +1,4 @@
+// Navigation and default landing routes by role.
 import { Activity, BedDouble, CalendarDays, ClipboardPlus, CreditCard, UserCheck, UserCog, Users } from "lucide-react";
 
 export const roleRoutes = {

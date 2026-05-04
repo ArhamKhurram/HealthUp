@@ -1,3 +1,4 @@
+// Authentication state container (login/logout/register + persisted session).
 import React, { createContext, useContext, useMemo, useState } from "react";
 import api from "../api/client";
 

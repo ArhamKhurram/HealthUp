@@ -1,658 +1,420 @@
+// OPD controller for doctor availability, appointments, and unified prescriptions.
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
+
 const SLOT_MINUTES = 30;
-const APPOINTMENT_STATUSES = ["Pending", "PendingPayment", "Confirmed", "CheckedIn", "Completed", "Cancelled"];
-const SLOT_BLOCKING_STATUSES = ["Pending", "PendingPayment", "Confirmed", "CheckedIn"];
-const APPOINTMENT_STATUS_TRANSITIONS = {
-  Pending: ["Pending", "PendingPayment", "Confirmed", "Cancelled"],
-  PendingPayment: ["PendingPayment", "Confirmed", "Cancelled"],
-  Confirmed: ["Confirmed", "CheckedIn", "Cancelled"],
-  CheckedIn: ["CheckedIn", "Completed", "Cancelled"],
-  Completed: ["Completed"],
-  Cancelled: ["Cancelled"]
-};
+const ACTIVE_APPOINTMENT_STATUSES = ["Pending", "Confirmed"];
 
-const getActorContext = async (pool, userId) => {
-  const result = await pool
-    .request()
-    .input("UserID", sql.Int, userId)
-    .query(`
-      SELECT
-        (SELECT TOP 1 PatientID FROM Patients WHERE UserID = @UserID) AS PatientID,
-        (SELECT TOP 1 DoctorID FROM Doctors WHERE UserID = @UserID) AS DoctorID
-    `);
-  return result.recordset[0] || { PatientID: null, DoctorID: null };
-};
+function normalizeOptional(value) {
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim();
+  return trimmed ? trimmed : null;
+}
 
-const getSlotWindow = (appointmentDate) => {
-  const requestedAt = new Date(appointmentDate);
-  if (Number.isNaN(requestedAt.getTime())) return null;
-  if (requestedAt.getMinutes() % SLOT_MINUTES !== 0 || requestedAt.getSeconds() !== 0 || requestedAt.getMilliseconds() !== 0) return null;
-  const dayOfWeek = requestedAt.getDay();
-  const hh = String(requestedAt.getHours()).padStart(2, "0");
-  const mm = String(requestedAt.getMinutes()).padStart(2, "0");
-  const appointmentTime = `${hh}:${mm}:00`;
-  const slotEnd = new Date(requestedAt.getTime() + SLOT_MINUTES * 60000);
-  return { requestedAt, dayOfWeek, appointmentTime, slotEnd };
-};
+function toSqlTime(value, fallback) {
+  if (value instanceof Date) return value.toISOString().slice(11, 16);
+  return String(value || fallback).slice(0, 5);
+}
 
-const ensureDoctorSlotAvailable = async ({ pool, doctorId, appointmentDate, excludeAppointmentId = null }) => {
-  const slot = getSlotWindow(appointmentDate);
-  if (!slot) {
-    return { ok: false, code: 400, message: "Appointments must start on 30-minute slots" };
+function sameDateBounds(dateText) {
+  const day = new Date(`${dateText}T00:00:00`);
+  const next = new Date(day);
+  next.setDate(next.getDate() + 1);
+  return { day, next };
+}
+
+async function actorContext(pool, req) {
+  if (req.user?.role === "Patient") {
+    const patient = await pool.request()
+      .input("UserID", sql.Int, req.user.userId)
+      .query("SELECT PatientID FROM Patients WHERE UserID = @UserID");
+    return { patientId: patient.recordset[0]?.PatientID || null, doctorId: null };
   }
 
-  const schedule = await pool
-    .request()
+  if (req.user?.role === "Doctor") {
+    const doctor = await pool.request()
+      .input("UserID", sql.Int, req.user.userId)
+      .query("SELECT DoctorID FROM Doctors WHERE UserID = @UserID");
+    return { patientId: null, doctorId: doctor.recordset[0]?.DoctorID || null };
+  }
+
+  return { patientId: null, doctorId: null };
+}
+
+async function assertSlotAvailable(pool, doctorId, appointmentDateTime, ignoredAppointmentId = null) {
+  const desired = new Date(appointmentDateTime);
+  if (Number.isNaN(desired.getTime())) {
+    const error = new Error("Appointment date and time is invalid");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const doctor = await pool.request()
     .input("DoctorID", sql.Int, doctorId)
-    .input("DayOfWeek", sql.Int, slot.dayOfWeek)
-    .input("AppointmentTime", sql.Time, slot.appointmentTime)
-    .query(`
-      SELECT TOP 1 ScheduleID
-      FROM DoctorSchedules
-      WHERE DoctorID = @DoctorID
-        AND DayOfWeek = @DayOfWeek
-        AND IsActive = 1
-        AND @AppointmentTime >= StartTime
-        AND DATEADD(minute, ${SLOT_MINUTES}, @AppointmentTime) <= EndTime
-    `);
-  if (!schedule.recordset[0]) {
-    return { ok: false, code: 400, message: "Selected time is outside doctor's schedule" };
+    .query("SELECT ShiftStartTime, ShiftEndTime, WorkDays FROM Doctors WHERE DoctorID = @DoctorID");
+  const row = doctor.recordset[0];
+  if (!row) {
+    const error = new Error("Doctor not found");
+    error.statusCode = 404;
+    throw error;
   }
 
-  const request = pool
-    .request()
-    .input("DoctorID", sql.Int, doctorId)
-    .input("StartAt", sql.DateTime2, slot.requestedAt)
-    .input("EndAt", sql.DateTime2, slot.slotEnd);
-  let excludeClause = "";
-  if (excludeAppointmentId) {
-    request.input("ExcludeAppointmentID", sql.Int, excludeAppointmentId);
-    excludeClause = "AND AppointmentID <> @ExcludeAppointmentID";
+  const workDays = String(row.WorkDays || "1,2,3,4,5").split(",").map(Number);
+  const dayOfWeek = desired.getDay();
+  if (!workDays.includes(dayOfWeek)) {
+    const error = new Error("Selected date is outside the doctor's weekly schedule");
+    error.statusCode = 400;
+    throw error;
   }
-  const conflict = await request.query(`
-      SELECT TOP 1 AppointmentID
-      FROM OPDAppointments
-      WHERE DoctorID = @DoctorID
-        AND Status IN (${SLOT_BLOCKING_STATUSES.map((s) => `'${s}'`).join(", ")})
-        AND AppointmentDate < @EndAt
-        AND DATEADD(minute, ${SLOT_MINUTES}, AppointmentDate) > @StartAt
-        ${excludeClause}
-    `);
+
+  const startTime = toSqlTime(row.ShiftStartTime, "09:00");
+  const endTime = toSqlTime(row.ShiftEndTime, "17:00");
+  const selectedTime = desired.toTimeString().slice(0, 5);
+  if (selectedTime < startTime || selectedTime >= endTime) {
+    const error = new Error("Selected time is outside the doctor's shift");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const conflictRequest = pool.request()
+    .input("DoctorID", sql.Int, doctorId)
+    .input("AppointmentDateTime", sql.DateTime2, desired)
+    .input("IgnoredAppointmentID", sql.Int, ignoredAppointmentId);
+
+  const conflict = await conflictRequest.query(`
+    SELECT AppointmentID
+    FROM OPDAppointments
+    WHERE DoctorID = @DoctorID
+      AND AppointmentDateTime = @AppointmentDateTime
+      AND Status IN ('${ACTIVE_APPOINTMENT_STATUSES.join("','")}')
+      AND (@IgnoredAppointmentID IS NULL OR AppointmentID <> @IgnoredAppointmentID)
+  `);
 
   if (conflict.recordset[0]) {
-    return { ok: false, code: 409, message: "This slot is already booked for the doctor" };
+    const error = new Error("That doctor slot is already booked");
+    error.statusCode = 409;
+    throw error;
   }
+}
 
-  return { ok: true };
-};
+function appointmentSelect(whereClause = "") {
+  return `
+    SELECT a.AppointmentID, a.PatientID, a.DoctorID,
+           a.AppointmentDateTime, a.AppointmentDateTime AS AppointmentDate,
+           a.AppointmentType, a.Status, a.ChiefComplaint,
+           a.AppointmentID AS TokenNumber,
+           p.MRNumber,
+           pu.FullName AS PatientName,
+           du.FullName AS DoctorName,
+           d.Specialization,
+           d.ConsultationFee
+    FROM OPDAppointments a
+    INNER JOIN Patients p ON p.PatientID = a.PatientID
+    INNER JOIN Users pu ON pu.UserID = p.UserID
+    INNER JOIN Doctors d ON d.DoctorID = a.DoctorID
+    INNER JOIN Users du ON du.UserID = d.UserID
+    ${whereClause}
+  `;
+}
 
 const listAvailableDoctorSlots = asyncHandler(async (req, res) => {
-  const doctorId = Number(req.params.doctorId);
-  const date = String(req.query.date || "");
-  if (!doctorId || !date) {
-    return res.status(400).json({ message: "Doctor and date are required" });
-  }
+  const { date } = req.query;
+  if (!date) return res.status(400).json({ message: "date query parameter is required" });
 
-  const requestedDay = new Date(`${date}T00:00:00`);
-  if (Number.isNaN(requestedDay.getTime())) {
-    return res.status(400).json({ message: "Invalid date format. Use YYYY-MM-DD" });
-  }
-
-  const dayOfWeek = requestedDay.getDay();
   const pool = await getPool();
+  const doctor = await pool.request()
+    .input("DoctorID", sql.Int, req.params.doctorId)
+    .query("SELECT ShiftStartTime, ShiftEndTime, WorkDays FROM Doctors WHERE DoctorID = @DoctorID");
+  const row = doctor.recordset[0];
+  if (!row) return res.status(404).json({ message: "Doctor not found" });
 
-  const scheduleResult = await pool
-    .request()
-    .input("DoctorID", sql.Int, doctorId)
-    .input("DayOfWeek", sql.Int, dayOfWeek)
+  const { day, next } = sameDateBounds(date);
+  const workDays = String(row.WorkDays || "1,2,3,4,5").split(",").map(Number);
+  if (!workDays.includes(day.getDay())) return res.json([]);
+
+  const booked = await pool.request()
+    .input("DoctorID", sql.Int, req.params.doctorId)
+    .input("Start", sql.DateTime2, day)
+    .input("End", sql.DateTime2, next)
     .query(`
-      SELECT StartTime, EndTime
-      FROM DoctorSchedules
-      WHERE DoctorID = @DoctorID
-        AND DayOfWeek = @DayOfWeek
-        AND IsActive = 1
-      ORDER BY StartTime
-    `);
-
-  if (!scheduleResult.recordset.length) {
-    return res.json([]);
-  }
-
-  const bookedResult = await pool
-    .request()
-    .input("DoctorID", sql.Int, doctorId)
-    .input("DateOnly", sql.Date, date)
-    .query(`
-      SELECT AppointmentDate
+      SELECT AppointmentDateTime
       FROM OPDAppointments
       WHERE DoctorID = @DoctorID
-        AND CAST(AppointmentDate AS DATE) = @DateOnly
-        AND Status IN (${SLOT_BLOCKING_STATUSES.map((s) => `'${s}'`).join(", ")})
+        AND AppointmentDateTime >= @Start
+        AND AppointmentDateTime < @End
+        AND Status IN ('Pending', 'Confirmed')
     `);
 
-  const booked = new Set(
-    bookedResult.recordset.map((row) => {
-      const dt = new Date(row.AppointmentDate);
-      const hh = String(dt.getHours()).padStart(2, "0");
-      const mm = String(dt.getMinutes()).padStart(2, "0");
-      return `${hh}:${mm}`;
-    })
-  );
+  const bookedTimes = new Set(booked.recordset.map((item) => new Date(item.AppointmentDateTime).toTimeString().slice(0, 5)));
+  const [startHour, startMinute] = toSqlTime(row.ShiftStartTime, "09:00").split(":").map(Number);
+  const [endHour, endMinute] = toSqlTime(row.ShiftEndTime, "17:00").split(":").map(Number);
+  const cursor = new Date(day);
+  cursor.setHours(startHour, startMinute, 0, 0);
+  const end = new Date(day);
+  end.setHours(endHour, endMinute, 0, 0);
 
-  const toMinutes = (value) => {
-    if (value instanceof Date) {
-      return value.getHours() * 60 + value.getMinutes();
+  const slots = [];
+  while (cursor < end) {
+    const time = cursor.toTimeString().slice(0, 5);
+    if (!bookedTimes.has(time)) {
+      slots.push({ value: `${date}T${time}`, label: time, time });
     }
-    const raw = String(value || "");
-    const hhmm = raw.includes("T")
-      ? raw.split("T")[1]?.slice(0, 5)
-      : raw.match(/\d{2}:\d{2}/)?.[0];
-    if (!hhmm) return NaN;
-    const [hh, mm] = hhmm.split(":").map(Number);
-    return hh * 60 + mm;
-  };
-  const formatTime = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
-
-  const available = [];
-  for (const row of scheduleResult.recordset) {
-    const start = toMinutes(row.StartTime);
-    const end = toMinutes(row.EndTime);
-    if (Number.isNaN(start) || Number.isNaN(end)) continue;
-    for (let current = start; current + SLOT_MINUTES <= end; current += SLOT_MINUTES) {
-      const time = formatTime(current);
-      if (!booked.has(time)) {
-        available.push({
-          value: `${date}T${time}`,
-          time
-        });
-      }
-    }
+    cursor.setMinutes(cursor.getMinutes() + SLOT_MINUTES);
   }
 
-  res.json(available);
+  res.json(slots);
 });
 
 const listAppointments = asyncHandler(async (req, res) => {
   const pool = await getPool();
+  const actor = await actorContext(pool, req);
   const request = pool.request();
   let whereClause = "";
+
   if (req.user.role === "Patient") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, actor.PatientID);
-    whereClause = "WHERE a.PatientID = @ActorPatientID";
+    request.input("PatientID", sql.Int, actor.patientId);
+    whereClause = "WHERE a.PatientID = @PatientID";
   } else if (req.user.role === "Doctor") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
-    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
-    whereClause = "WHERE a.DoctorID = @ActorDoctorID";
+    request.input("DoctorID", sql.Int, actor.doctorId);
+    whereClause = "WHERE a.DoctorID = @DoctorID";
   }
 
-  const result = await request.query(`
-    SELECT a.AppointmentID, a.PatientID, a.DoctorID, a.RoomID,
-           a.AppointmentDate, a.AppointmentType, a.Status,
-           a.ChiefComplaint, a.TokenNumber, p.MRNumber,
-           patientUser.FullName AS PatientName, doctorUser.FullName AS DoctorName,
-           r.RoomNumber
-    FROM OPDAppointments a
-    INNER JOIN Patients p ON p.PatientID = a.PatientID
-    INNER JOIN Users patientUser ON patientUser.UserID = p.UserID
-    INNER JOIN Doctors d ON d.DoctorID = a.DoctorID
-    INNER JOIN Users doctorUser ON doctorUser.UserID = d.UserID
-    LEFT JOIN OPDRooms r ON r.RoomID = a.RoomID
-    ${whereClause}
-    ORDER BY a.AppointmentDate DESC
-  `);
+  const result = await request.query(`${appointmentSelect(whereClause)} ORDER BY a.AppointmentDateTime DESC`);
   res.json(result.recordset);
-});
-
-const createAppointment = asyncHandler(async (req, res) => {
-  const { patientId, doctorId, roomId, appointmentDate, appointmentType, chiefComplaint } = req.body;
-  let effectivePatientId = patientId;
-
-  if (!doctorId || !appointmentDate || !appointmentType) {
-    return res.status(400).json({ message: "Patient, doctor, appointment date, and appointment type are required" });
-  }
-
-  const pool = await getPool();
-  if (req.user.role === "Patient") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
-    if (patientId && Number(patientId) !== Number(actor.PatientID)) {
-      return res.status(403).json({ message: "Patients can only create their own appointments" });
-    }
-    effectivePatientId = actor.PatientID;
-  }
-
-  if (!effectivePatientId) {
-    return res.status(400).json({ message: "Patient is required" });
-  }
-
-  const slotValidation = await ensureDoctorSlotAvailable({ pool, doctorId, appointmentDate });
-  if (!slotValidation.ok) {
-    return res.status(slotValidation.code).json({ message: slotValidation.message });
-  }
-
-  const created = await pool
-    .request()
-    .input("PatientID", sql.Int, effectivePatientId)
-    .input("DoctorID", sql.Int, doctorId)
-    .input("RoomID", sql.Int, roomId || null)
-    .input("AppointmentDate", sql.DateTime2, appointmentDate)
-    .input("AppointmentType", sql.NVarChar(50), appointmentType)
-    .input("ChiefComplaint", sql.NVarChar(sql.MAX), chiefComplaint || null)
-    .query(`
-      EXEC sp_BookOPDAppointment
-        @PatientID = @PatientID,
-        @DoctorID = @DoctorID,
-        @RoomID = @RoomID,
-        @AppointmentDate = @AppointmentDate,
-        @AppointmentType = @AppointmentType,
-        @ChiefComplaint = @ChiefComplaint
-    `);
-
-  const appointmentId = created.recordset[0]?.AppointmentID;
-  const result = await pool
-    .request()
-    .input("AppointmentID", sql.Int, appointmentId)
-    .query("SELECT * FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
-
-  res.status(201).json(result.recordset[0]);
 });
 
 const getAppointment = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const request = pool.request().input("AppointmentID", sql.Int, req.params.id);
-  let whereClause = "WHERE AppointmentID = @AppointmentID";
-  if (req.user.role === "Patient") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, actor.PatientID);
-    whereClause += " AND PatientID = @ActorPatientID";
-  } else if (req.user.role === "Doctor") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
-    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
-    whereClause += " AND DoctorID = @ActorDoctorID";
-  }
+  const result = await pool.request()
+    .input("AppointmentID", sql.Int, req.params.id)
+    .query(`${appointmentSelect("WHERE a.AppointmentID = @AppointmentID")}`);
 
-  const result = await request.query(`
-      SELECT *
-      FROM OPDAppointments
-      ${whereClause}
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Appointment not found" });
-  }
-
+  if (!result.recordset[0]) return res.status(404).json({ message: "Appointment not found" });
   res.json(result.recordset[0]);
 });
 
+const createAppointment = asyncHandler(async (req, res) => {
+  const { patientId, doctorId, appointmentDate, appointmentDateTime, appointmentType, chiefComplaint } = req.body;
+  const selectedDate = appointmentDateTime || appointmentDate;
+  const pool = await getPool();
+  await assertSlotAvailable(pool, doctorId, selectedDate);
+
+  const result = await pool.request()
+    .input("PatientID", sql.Int, patientId)
+    .input("DoctorID", sql.Int, doctorId)
+    .input("AppointmentDateTime", sql.DateTime2, new Date(selectedDate))
+    .input("AppointmentType", sql.NVarChar(50), appointmentType || "Consultation")
+    .input("ChiefComplaint", sql.NVarChar(sql.MAX), normalizeOptional(chiefComplaint))
+    .query(`
+      INSERT INTO OPDAppointments (PatientID, DoctorID, AppointmentDateTime, AppointmentType, Status, ChiefComplaint)
+      OUTPUT INSERTED.*, INSERTED.AppointmentDateTime AS AppointmentDate
+      VALUES (@PatientID, @DoctorID, @AppointmentDateTime, @AppointmentType, 'Pending', @ChiefComplaint)
+    `);
+
+  res.status(201).json(result.recordset[0]);
+});
+
 const updateAppointment = asyncHandler(async (req, res) => {
-  const { patientId, doctorId, roomId, appointmentDate, appointmentType, status, chiefComplaint } = req.body;
-  if (status && !APPOINTMENT_STATUSES.includes(status)) {
-    return res.status(400).json({ message: "Invalid appointment status" });
-  }
+  const { patientId, doctorId, appointmentDate, appointmentDateTime, appointmentType, status, chiefComplaint } = req.body;
+  const selectedDate = appointmentDateTime || appointmentDate;
+  const nextStatus = status || "Pending";
+  if (!["Pending", "Confirmed", "Completed"].includes(nextStatus)) return res.status(400).json({ message: "Invalid appointment status" });
 
   const pool = await getPool();
-  const current = await pool.request().input("AppointmentID", sql.Int, req.params.id).query("SELECT * FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
-  if (!current.recordset[0]) {
-    return res.status(404).json({ message: "Appointment not found" });
-  }
-  const existing = current.recordset[0];
-  const nextStatus = status || existing.Status || "Pending";
-  const allowedTransitions = APPOINTMENT_STATUS_TRANSITIONS[existing.Status] || [existing.Status];
-  if (status && !allowedTransitions.includes(status)) {
-    return res.status(409).json({ message: `Appointment cannot move from ${existing.Status} to ${status}` });
-  }
-
-  const nextDoctorId = doctorId || existing.DoctorID;
-  const nextAppointmentDate = appointmentDate || existing.AppointmentDate;
-  if (doctorId || appointmentDate) {
-    const slotValidation = await ensureDoctorSlotAvailable({
-      pool,
-      doctorId: nextDoctorId,
-      appointmentDate: nextAppointmentDate,
-      excludeAppointmentId: Number(req.params.id)
-    });
-    if (!slotValidation.ok) {
-      return res.status(slotValidation.code).json({ message: slotValidation.message });
-    }
-  }
-
-  if (status === "Confirmed") {
-    const payment = await pool
-      .request()
-      .input("AppointmentID", sql.Int, req.params.id)
-      .query(`
-        SELECT TOP 1 PaymentID, Status, PaidAmount, TotalAmount
-        FROM OPDPayments
-        WHERE AppointmentID = @AppointmentID
-        ORDER BY PaymentID DESC
-      `);
-    const latestPayment = payment.recordset[0];
-    if (!latestPayment || latestPayment.Status !== "Paid" || Number(latestPayment.PaidAmount) < Number(latestPayment.TotalAmount)) {
-      return res.status(409).json({ message: "Appointment can only be confirmed after paid OPD payment" });
-    }
-  }
-
-  const result = await pool
-    .request()
+  const existing = await pool.request()
     .input("AppointmentID", sql.Int, req.params.id)
-    .input("PatientID", sql.Int, patientId || existing.PatientID)
-    .input("DoctorID", sql.Int, nextDoctorId)
-    .input("RoomID", sql.Int, roomId !== undefined ? roomId : existing.RoomID)
-    .input("AppointmentDate", sql.DateTime2, nextAppointmentDate)
-    .input("AppointmentType", sql.NVarChar(50), appointmentType || existing.AppointmentType)
+    .query("SELECT * FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
+  if (!existing.recordset[0]) return res.status(404).json({ message: "Appointment not found" });
+
+  const mergedDoctorId = doctorId || existing.recordset[0].DoctorID;
+  const mergedDate = selectedDate || existing.recordset[0].AppointmentDateTime;
+  await assertSlotAvailable(pool, mergedDoctorId, mergedDate, Number(req.params.id));
+
+  const result = await pool.request()
+    .input("AppointmentID", sql.Int, req.params.id)
+    .input("PatientID", sql.Int, patientId || existing.recordset[0].PatientID)
+    .input("DoctorID", sql.Int, mergedDoctorId)
+    .input("AppointmentDateTime", sql.DateTime2, new Date(mergedDate))
+    .input("AppointmentType", sql.NVarChar(50), appointmentType || existing.recordset[0].AppointmentType)
     .input("Status", sql.NVarChar(30), nextStatus)
-    .input("ChiefComplaint", sql.NVarChar(sql.MAX), chiefComplaint !== undefined ? chiefComplaint : existing.ChiefComplaint)
+    .input("ChiefComplaint", sql.NVarChar(sql.MAX), chiefComplaint ?? existing.recordset[0].ChiefComplaint)
     .query(`
       UPDATE OPDAppointments
       SET PatientID = @PatientID,
           DoctorID = @DoctorID,
-          RoomID = @RoomID,
-          AppointmentDate = @AppointmentDate,
+          AppointmentDateTime = @AppointmentDateTime,
           AppointmentType = @AppointmentType,
           Status = @Status,
           ChiefComplaint = @ChiefComplaint
-      OUTPUT INSERTED.*
+      OUTPUT INSERTED.*, INSERTED.AppointmentDateTime AS AppointmentDate
       WHERE AppointmentID = @AppointmentID
     `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Appointment not found" });
-  }
 
   res.json(result.recordset[0]);
 });
 
 const deleteAppointment = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("AppointmentID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM OPDAppointments
-      OUTPUT DELETED.*
-      WHERE AppointmentID = @AppointmentID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Appointment not found" });
-  }
-
-  res.json(result.recordset[0]);
+    .query("DELETE FROM OPDAppointments OUTPUT DELETED.AppointmentID WHERE AppointmentID = @AppointmentID");
+  if (!result.recordset[0]) return res.status(404).json({ message: "Appointment not found" });
+  res.json({ message: "Appointment deleted" });
 });
+
+function prescriptionSelect(whereClause = "WHERE pr.AppointmentID IS NOT NULL") {
+  return `
+    SELECT pr.PrescriptionID, pr.PatientID, pr.DoctorID, pr.AppointmentID, pr.PrescriptionDate,
+           pr.Diagnosis, pr.Notes,
+           pu.FullName AS PatientName, du.FullName AS DoctorName,
+           meds.MedicationName, meds.Dosage, meds.Frequency
+    FROM Prescriptions pr
+    INNER JOIN Patients p ON p.PatientID = pr.PatientID
+    INNER JOIN Users pu ON pu.UserID = p.UserID
+    INNER JOIN Doctors d ON d.DoctorID = pr.DoctorID
+    INNER JOIN Users du ON du.UserID = d.UserID
+    OUTER APPLY (
+      SELECT
+        STRING_AGG(m.MedicationName, ', ') AS MedicationName,
+        STRING_AGG(pm.Dosage, ', ') AS Dosage,
+        STRING_AGG(pm.Frequency, ', ') AS Frequency
+      FROM PrescriptionMedications pm
+      INNER JOIN Medications m ON m.MedicationID = pm.MedicationID
+      WHERE pm.PrescriptionID = pr.PrescriptionID
+    ) meds
+    ${whereClause}
+  `;
+}
 
 const listPrescriptions = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const request = pool.request();
-  let whereClause = "";
-  if (req.user.role === "Patient") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, actor.PatientID);
-    whereClause = "WHERE pr.PatientID = @ActorPatientID";
-  } else if (req.user.role === "Doctor") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
-    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
-    whereClause = "WHERE pr.DoctorID = @ActorDoctorID";
-  }
-
-  const result = await request.query(`
-    SELECT pr.PrescriptionID, pr.AppointmentID, pr.PatientID, pr.DoctorID,
-           pr.PrescriptionDate, pr.Diagnosis,
-           patientUser.FullName AS PatientName, doctorUser.FullName AS DoctorName
-    FROM OPDPrescriptions pr
-    INNER JOIN Patients p ON p.PatientID = pr.PatientID
-    INNER JOIN Users patientUser ON patientUser.UserID = p.UserID
-    INNER JOIN Doctors d ON d.DoctorID = pr.DoctorID
-    INNER JOIN Users doctorUser ON doctorUser.UserID = d.UserID
-    ${whereClause}
-    ORDER BY pr.PrescriptionID DESC
-  `);
-
+  const result = await pool.request().query(`${prescriptionSelect()} ORDER BY pr.PrescriptionDate DESC`);
   res.json(result.recordset);
 });
 
 const getPrescription = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const request = pool.request().input("PrescriptionID", sql.Int, req.params.id);
-  let whereClause = "WHERE PrescriptionID = @PrescriptionID";
-  if (req.user.role === "Patient") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.PatientID) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, actor.PatientID);
-    whereClause += " AND PatientID = @ActorPatientID";
-  } else if (req.user.role === "Doctor") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
-    request.input("ActorDoctorID", sql.Int, actor.DoctorID);
-    whereClause += " AND DoctorID = @ActorDoctorID";
-  }
-
-  const result = await request.query(`
-      SELECT *
-      FROM OPDPrescriptions
-      ${whereClause}
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription not found" });
-  }
-
+  const result = await pool.request()
+    .input("PrescriptionID", sql.Int, req.params.id)
+    .query(`${prescriptionSelect("WHERE pr.PrescriptionID = @PrescriptionID AND pr.AppointmentID IS NOT NULL")}`);
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription not found" });
   res.json(result.recordset[0]);
 });
 
 const createPrescription = asyncHandler(async (req, res) => {
-  const { appointmentId, patientId, doctorId, prescriptionDate, diagnosis } = req.body;
-  let effectiveDoctorId = doctorId;
-
-  if (!appointmentId || !patientId || !doctorId) {
-    return res.status(400).json({ message: "Appointment, patient, and doctor are required" });
-  }
-
+  const { appointmentId, patientId, doctorId, diagnosis, notes } = req.body;
   const pool = await getPool();
-  const appointmentCheck = await pool
-    .request()
-    .input("AppointmentID", sql.Int, appointmentId)
-    .query("SELECT AppointmentID, PatientID, DoctorID FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
-  const appointment = appointmentCheck.recordset[0];
-  if (!appointment) return res.status(404).json({ message: "Appointment not found" });
-  if (Number(appointment.PatientID) !== Number(patientId) || Number(appointment.DoctorID) !== Number(doctorId)) {
-    return res.status(400).json({ message: "Prescription must match appointment patient and doctor" });
-  }
-  if (req.user.role === "Doctor") {
-    const actor = await getActorContext(pool, req.user.userId);
-    if (!actor.DoctorID) return res.status(403).json({ message: "Doctor profile is required" });
-    if (Number(actor.DoctorID) !== Number(doctorId)) {
-      return res.status(403).json({ message: "Doctors can only create prescriptions under their own profile" });
-    }
-    effectiveDoctorId = actor.DoctorID;
-  }
-
-  const created = await pool
-    .request()
+  const result = await pool.request()
     .input("AppointmentID", sql.Int, appointmentId)
     .input("PatientID", sql.Int, patientId)
-    .input("DoctorID", sql.Int, effectiveDoctorId)
-    .input("PrescriptionDate", sql.Date, prescriptionDate || null)
+    .input("DoctorID", sql.Int, doctorId)
     .input("Diagnosis", sql.NVarChar(sql.MAX), diagnosis || null)
+    .input("Notes", sql.NVarChar(sql.MAX), notes || null)
     .query(`
-      EXEC sp_AddOPDPrescription
-        @AppointmentID = @AppointmentID,
-        @PatientID = @PatientID,
-        @DoctorID = @DoctorID,
-        @PrescriptionDate = @PrescriptionDate,
-        @Diagnosis = @Diagnosis
+      INSERT INTO Prescriptions (AppointmentID, PatientID, DoctorID, Diagnosis, Notes)
+      OUTPUT INSERTED.*
+      VALUES (@AppointmentID, @PatientID, @DoctorID, @Diagnosis, @Notes)
     `);
-
-  const prescriptionId = created.recordset[0]?.PrescriptionID;
-  const result = await pool
-    .request()
-    .input("PrescriptionID", sql.Int, prescriptionId)
-    .query("SELECT * FROM OPDPrescriptions WHERE PrescriptionID = @PrescriptionID");
-
   res.status(201).json(result.recordset[0]);
 });
 
 const updatePrescription = asyncHandler(async (req, res) => {
-  const { appointmentId, patientId, doctorId, prescriptionDate, diagnosis } = req.body;
-
-  if (!appointmentId || !patientId || !doctorId) {
-    return res.status(400).json({ message: "Appointment, patient, and doctor are required" });
-  }
-
+  const { diagnosis, notes } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionID", sql.Int, req.params.id)
-    .input("AppointmentID", sql.Int, appointmentId)
-    .input("PatientID", sql.Int, patientId)
-    .input("DoctorID", sql.Int, doctorId)
-    .input("PrescriptionDate", sql.Date, prescriptionDate || null)
     .input("Diagnosis", sql.NVarChar(sql.MAX), diagnosis || null)
+    .input("Notes", sql.NVarChar(sql.MAX), notes || null)
     .query(`
-      UPDATE OPDPrescriptions
-      SET AppointmentID = @AppointmentID,
-          PatientID = @PatientID,
-          DoctorID = @DoctorID,
-          PrescriptionDate = COALESCE(@PrescriptionDate, PrescriptionDate),
-          Diagnosis = @Diagnosis
+      UPDATE Prescriptions
+      SET Diagnosis = @Diagnosis, Notes = @Notes
       OUTPUT INSERTED.*
-      WHERE PrescriptionID = @PrescriptionID
+      WHERE PrescriptionID = @PrescriptionID AND AppointmentID IS NOT NULL
     `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription not found" });
-  }
-
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription not found" });
   res.json(result.recordset[0]);
 });
 
 const deletePrescription = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM OPDPrescriptions
-      OUTPUT DELETED.*
-      WHERE PrescriptionID = @PrescriptionID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription not found" });
-  }
-
-  res.json(result.recordset[0]);
+    .query("DELETE FROM Prescriptions OUTPUT DELETED.PrescriptionID WHERE PrescriptionID = @PrescriptionID AND AppointmentID IS NOT NULL");
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription not found" });
+  res.json({ message: "Prescription deleted" });
 });
 
 const listPrescriptionMedications = asyncHandler(async (req, res) => {
   const pool = await getPool();
   const result = await pool.request().query(`
-    SELECT pm.PrescriptionMedicationID, pm.PrescriptionID, pm.MedicationID,
-           pm.Dosage, pm.Frequency, m.MedicationName
-    FROM OPDPrescriptionMedications pm
+    SELECT pm.*, m.MedicationName, pr.AppointmentID, pr.AdmissionID
+    FROM PrescriptionMedications pm
+    INNER JOIN Prescriptions pr ON pr.PrescriptionID = pm.PrescriptionID
     INNER JOIN Medications m ON m.MedicationID = pm.MedicationID
+    WHERE pr.AppointmentID IS NOT NULL
     ORDER BY pm.PrescriptionMedicationID DESC
   `);
-
   res.json(result.recordset);
 });
 
 const getPrescriptionMedication = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionMedicationID", sql.Int, req.params.id)
-    .query(`
-      SELECT *
-      FROM OPDPrescriptionMedications
-      WHERE PrescriptionMedicationID = @PrescriptionMedicationID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription medication not found" });
-  }
-
+    .query("SELECT * FROM PrescriptionMedications WHERE PrescriptionMedicationID = @PrescriptionMedicationID");
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription medication not found" });
   res.json(result.recordset[0]);
 });
 
 const createPrescriptionMedication = asyncHandler(async (req, res) => {
-  const { prescriptionId, medicationId, dosage, frequency } = req.body;
-
-  if (!prescriptionId || !medicationId || !dosage || !frequency) {
-    return res.status(400).json({ message: "Prescription, medication, dosage, and frequency are required" });
-  }
-
+  const { prescriptionId, medicationId, dosage, frequency, durationDays, instructions } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionID", sql.Int, prescriptionId)
     .input("MedicationID", sql.Int, medicationId)
-    .input("Dosage", sql.NVarChar(80), dosage)
-    .input("Frequency", sql.NVarChar(80), frequency)
+    .input("Dosage", sql.NVarChar(80), dosage || null)
+    .input("Frequency", sql.NVarChar(100), frequency || null)
+    .input("DurationDays", sql.Int, durationDays || null)
+    .input("Instructions", sql.NVarChar(sql.MAX), instructions || null)
     .query(`
-      INSERT INTO OPDPrescriptionMedications (PrescriptionID, MedicationID, Dosage, Frequency)
+      INSERT INTO PrescriptionMedications (PrescriptionID, MedicationID, Dosage, Frequency, DurationDays, Instructions)
       OUTPUT INSERTED.*
-      VALUES (@PrescriptionID, @MedicationID, @Dosage, @Frequency)
+      VALUES (@PrescriptionID, @MedicationID, @Dosage, @Frequency, @DurationDays, @Instructions)
     `);
-
   res.status(201).json(result.recordset[0]);
 });
 
 const updatePrescriptionMedication = asyncHandler(async (req, res) => {
-  const { prescriptionId, medicationId, dosage, frequency } = req.body;
-
-  if (!prescriptionId || !medicationId || !dosage || !frequency) {
-    return res.status(400).json({ message: "Prescription, medication, dosage, and frequency are required" });
-  }
-
+  const { medicationId, dosage, frequency, durationDays, instructions } = req.body;
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionMedicationID", sql.Int, req.params.id)
-    .input("PrescriptionID", sql.Int, prescriptionId)
     .input("MedicationID", sql.Int, medicationId)
-    .input("Dosage", sql.NVarChar(80), dosage)
-    .input("Frequency", sql.NVarChar(80), frequency)
+    .input("Dosage", sql.NVarChar(80), dosage || null)
+    .input("Frequency", sql.NVarChar(100), frequency || null)
+    .input("DurationDays", sql.Int, durationDays || null)
+    .input("Instructions", sql.NVarChar(sql.MAX), instructions || null)
     .query(`
-      UPDATE OPDPrescriptionMedications
-      SET PrescriptionID = @PrescriptionID,
-          MedicationID = @MedicationID,
+      UPDATE PrescriptionMedications
+      SET MedicationID = @MedicationID,
           Dosage = @Dosage,
-          Frequency = @Frequency
+          Frequency = @Frequency,
+          DurationDays = @DurationDays,
+          Instructions = @Instructions
       OUTPUT INSERTED.*
       WHERE PrescriptionMedicationID = @PrescriptionMedicationID
     `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription medication not found" });
-  }
-
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription medication not found" });
   res.json(result.recordset[0]);
 });
 
 const deletePrescriptionMedication = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PrescriptionMedicationID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM OPDPrescriptionMedications
-      OUTPUT DELETED.*
-      WHERE PrescriptionMedicationID = @PrescriptionMedicationID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "Prescription medication not found" });
-  }
-
-  res.json(result.recordset[0]);
+    .query("DELETE FROM PrescriptionMedications OUTPUT DELETED.PrescriptionMedicationID WHERE PrescriptionMedicationID = @PrescriptionMedicationID");
+  if (!result.recordset[0]) return res.status(404).json({ message: "Prescription medication not found" });
+  res.json({ message: "Prescription medication deleted" });
 });
 
 module.exports = {

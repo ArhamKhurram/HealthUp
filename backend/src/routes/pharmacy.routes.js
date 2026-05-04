@@ -1,3 +1,4 @@
+// Pharmacy routes: medications and inventory.
 const router = require("express").Router();
 const {
   listMedications,

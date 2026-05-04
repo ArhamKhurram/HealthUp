@@ -1,3 +1,5 @@
+// Admin user lifecycle controller.
+// Keeps Users as the account table and stores role-specific fields only in Patients, Doctors, or Nurses.
 const bcrypt = require("bcryptjs");
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
@@ -30,22 +32,37 @@ function buildMrNumber(userId) {
   return `MR-${String(userId).padStart(4, "0")}`;
 }
 
+function formatDbTime(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(11, 16);
+  return String(value).slice(0, 5);
+}
+
+function normalizeWorkDays(scheduleDays, fallback = "1,2,3,4,5") {
+  const days = Array.isArray(scheduleDays)
+    ? scheduleDays.map((day) => Number(day)).filter((day) => day >= 0 && day <= 6)
+    : String(scheduleDays || fallback)
+        .split(",")
+        .map((day) => Number(day.trim()))
+        .filter((day) => day >= 0 && day <= 6);
+  return [...new Set(days)].sort((a, b) => a - b).join(",");
+}
+
 function validationErrorResponse(res, errors, message = "Validation failed") {
-  return res.status(400).json({
-    code: "USER_VALIDATION_FAILED",
-    message,
-    errors
-  });
+  return res.status(400).json({ code: "USER_VALIDATION_FAILED", message, errors });
 }
 
 function roleValidation(role, profile, isUpdate = false, allowAdmin = false) {
   const errors = [];
   const normalizedRole = normalizeOptional(role);
   const allowedRoles = allowAdmin ? VALID_ROLES : CREATABLE_ROLES;
+
   if (!allowedRoles.includes(normalizedRole)) {
     errors.push({
       field: "role",
-      message: allowAdmin
+      message: !allowAdmin && normalizedRole === "Admin"
+        ? "Admin users cannot be created from this flow"
+        : allowAdmin
         ? "Role must be one of Admin, Receptionist, Doctor, Nurse, or Patient"
         : "Role must be one of Receptionist, Doctor, Nurse, or Patient"
     });
@@ -54,12 +71,8 @@ function roleValidation(role, profile, isUpdate = false, allowAdmin = false) {
   if (normalizedRole === "Patient") {
     if (!normalizeOptional(profile?.dateOfBirth) && !isUpdate) errors.push({ field: "profile.dateOfBirth", message: "Patient dateOfBirth is required" });
     if (!normalizeOptional(profile?.gender) && !isUpdate) errors.push({ field: "profile.gender", message: "Patient gender is required" });
-    if (normalizeOptional(profile?.gender) && !VALID_GENDERS.includes(profile.gender)) {
-      errors.push({ field: "profile.gender", message: "Patient gender must be M, F, or Other" });
-    }
-    if (normalizeOptional(profile?.bloodGroup) && !VALID_BLOOD_GROUPS.includes(profile.bloodGroup)) {
-      errors.push({ field: "profile.bloodGroup", message: "Patient bloodGroup is invalid" });
-    }
+    if (normalizeOptional(profile?.gender) && !VALID_GENDERS.includes(profile.gender)) errors.push({ field: "profile.gender", message: "Patient gender must be M, F, or Other" });
+    if (normalizeOptional(profile?.bloodGroup) && !VALID_BLOOD_GROUPS.includes(profile.bloodGroup)) errors.push({ field: "profile.bloodGroup", message: "Patient bloodGroup is invalid" });
   }
 
   if (normalizedRole === "Doctor") {
@@ -67,185 +80,143 @@ function roleValidation(role, profile, isUpdate = false, allowAdmin = false) {
     if (normalizeOptional(profile?.specialization) && !DOCTOR_SPECIALIZATIONS.includes(profile.specialization)) errors.push({ field: "profile.specialization", message: "Doctor specialization is invalid" });
     if (normalizeOptional(profile?.qualification) && !DOCTOR_QUALIFICATIONS.includes(profile.qualification)) errors.push({ field: "profile.qualification", message: "Doctor qualification is invalid" });
     if (normalizeOptional(profile?.designation) && !DOCTOR_DESIGNATIONS.includes(profile.designation)) errors.push({ field: "profile.designation", message: "Doctor designation is invalid" });
-    const dayCount = Array.isArray(profile?.scheduleDays) ? profile.scheduleDays.length : 0;
-    if (!dayCount) errors.push({ field: "profile.scheduleDays", message: "Doctor scheduleDays is required" });
+    if (!Array.isArray(profile?.scheduleDays) || profile.scheduleDays.length === 0) errors.push({ field: "profile.scheduleDays", message: "Doctor scheduleDays is required" });
     if (!normalizeOptional(profile?.startTime)) errors.push({ field: "profile.startTime", message: "Doctor startTime is required" });
     if (!normalizeOptional(profile?.endTime)) errors.push({ field: "profile.endTime", message: "Doctor endTime is required" });
   }
 
-  if (normalizedRole === "Nurse") {
-    if (!profile?.departmentId && !isUpdate) errors.push({ field: "profile.departmentId", message: "Nurse departmentId is required" });
+  if (normalizedRole === "Nurse" && !profile?.departmentId && !isUpdate) {
+    errors.push({ field: "profile.departmentId", message: "Nurse departmentId is required" });
   }
 
   return errors;
 }
 
-async function upsertRoleProfile(transaction, userId, role, profile, actorUserId) {
-  if (role === "Patient") {
-    const dateOfBirth = normalizeOptional(profile?.dateOfBirth);
-    const gender = normalizeOptional(profile?.gender);
-    const bloodGroup = normalizeOptional(profile?.bloodGroup);
-    const emergencyContact = normalizeOptional(profile?.emergencyContact);
-    const allergies = normalizeOptional(profile?.allergies);
-    const chronicConditions = normalizeOptional(profile?.chronicConditions);
-    const mrNumber = normalizeOptional(profile?.mrNumber);
+async function upsertPatientProfile(transaction, userId, profile) {
+  const existing = await new sql.Request(transaction)
+    .input("UserID", sql.Int, userId)
+    .query("SELECT PatientID FROM Patients WHERE UserID = @UserID");
 
-    const existing = await new sql.Request(transaction)
-      .input("UserID", sql.Int, userId)
-      .query("SELECT PatientID FROM Patients WHERE UserID = @UserID");
-
-    if (!existing.recordset[0]) {
-      await new sql.Request(transaction)
-        .input("UserID", sql.Int, userId)
-        .input("MRNumber", sql.NVarChar(50), mrNumber || buildMrNumber(userId))
-        .input("DateOfBirth", sql.Date, dateOfBirth)
-        .input("Gender", sql.NVarChar(20), gender)
-        .input("BloodGroup", sql.NVarChar(10), bloodGroup)
-        .input("EmergencyContact", sql.NVarChar(50), emergencyContact)
-        .input("Allergies", sql.NVarChar(sql.MAX), allergies)
-        .input("ChronicConditions", sql.NVarChar(sql.MAX), chronicConditions)
-        .query(`
-          INSERT INTO Patients (UserID, MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions)
-          VALUES (@UserID, @MRNumber, @DateOfBirth, @Gender, @BloodGroup, @EmergencyContact, @Allergies, @ChronicConditions)
-        `);
-    } else {
-      await new sql.Request(transaction)
-        .input("UserID", sql.Int, userId)
-        .input("DateOfBirth", sql.Date, dateOfBirth)
-        .input("Gender", sql.NVarChar(20), gender)
-        .input("BloodGroup", sql.NVarChar(10), bloodGroup)
-        .input("EmergencyContact", sql.NVarChar(50), emergencyContact)
-        .input("Allergies", sql.NVarChar(sql.MAX), allergies)
-        .input("ChronicConditions", sql.NVarChar(sql.MAX), chronicConditions)
-        .query(`
-          UPDATE Patients
-          SET DateOfBirth = COALESCE(@DateOfBirth, DateOfBirth),
-              Gender = COALESCE(@Gender, Gender),
-              BloodGroup = @BloodGroup,
-              EmergencyContact = @EmergencyContact,
-              Allergies = @Allergies,
-              ChronicConditions = @ChronicConditions
-          WHERE UserID = @UserID
-        `);
-    }
-    return;
-  }
-
-  if (role === "Doctor") {
-    const specialization = normalizeOptional(profile?.specialization);
-    const qualification = normalizeOptional(profile?.qualification);
-    const designation = normalizeOptional(profile?.designation);
-    const licenseNumber = normalizeOptional(profile?.licenseNumber) || `LIC-${userId}`;
-    const experienceYears = 0;
-    const consultationFee = Number(profile?.consultationFee || 0);
-    const availableForOPD = true;
-    const availableForIPD = true;
-    const scheduleDays = Array.isArray(profile?.scheduleDays) ? profile.scheduleDays.map((d) => Number(d)).filter((d) => d >= 0 && d <= 6) : [1, 2, 3, 4, 5];
-    const startTime = normalizeOptional(profile?.startTime) || "09:00";
-    const endTime = normalizeOptional(profile?.endTime) || "17:00";
-
-    const existing = await new sql.Request(transaction)
-      .input("UserID", sql.Int, userId)
-      .query("SELECT DoctorID FROM Doctors WHERE UserID = @UserID");
-
-    let doctorId = existing.recordset[0]?.DoctorID;
-    if (!doctorId) {
-      const inserted = await new sql.Request(transaction)
-        .input("UserID", sql.Int, userId)
-        .input("Specialization", sql.NVarChar(100), specialization)
-        .input("Qualification", sql.NVarChar(150), qualification)
-        .input("Designation", sql.NVarChar(100), designation)
-        .input("LicenseNumber", sql.NVarChar(80), licenseNumber)
-        .input("ExperienceYears", sql.Int, experienceYears)
-        .input("ConsultationFee", sql.Decimal(10, 2), consultationFee)
-        .input("AvailableForOPD", sql.Bit, availableForOPD)
-        .input("AvailableForIPD", sql.Bit, availableForIPD)
-        .query(`
-          INSERT INTO Doctors (UserID, Specialization, Qualification, Designation, LicenseNumber, ExperienceYears, ConsultationFee, AvailableForOPD, AvailableForIPD)
-          OUTPUT INSERTED.DoctorID
-          VALUES (@UserID, @Specialization, @Qualification, @Designation, @LicenseNumber, @ExperienceYears, @ConsultationFee, @AvailableForOPD, @AvailableForIPD)
-        `);
-      doctorId = inserted.recordset[0].DoctorID;
-    } else {
-      await new sql.Request(transaction)
-        .input("UserID", sql.Int, userId)
-        .input("Specialization", sql.NVarChar(100), specialization)
-        .input("Qualification", sql.NVarChar(150), qualification)
-        .input("Designation", sql.NVarChar(100), designation)
-        .input("LicenseNumber", sql.NVarChar(80), licenseNumber)
-        .input("ExperienceYears", sql.Int, experienceYears)
-        .input("ConsultationFee", sql.Decimal(10, 2), consultationFee)
-        .input("AvailableForOPD", sql.Bit, availableForOPD)
-        .input("AvailableForIPD", sql.Bit, availableForIPD)
-        .query(`
-          UPDATE Doctors
-          SET Specialization = @Specialization,
-              Qualification = @Qualification,
-              Designation = @Designation,
-              LicenseNumber = @LicenseNumber,
-              ExperienceYears = @ExperienceYears,
-              ConsultationFee = @ConsultationFee,
-              AvailableForOPD = @AvailableForOPD,
-              AvailableForIPD = @AvailableForIPD
-          WHERE UserID = @UserID
-        `);
-    }
-
+  if (!existing.recordset[0]) {
     await new sql.Request(transaction)
-      .input("DoctorID", sql.Int, doctorId)
-      .query("DELETE FROM DoctorSchedules WHERE DoctorID = @DoctorID");
-
-    for (const day of scheduleDays) {
-      await new sql.Request(transaction)
-        .input("DoctorID", sql.Int, doctorId)
-        .input("DayOfWeek", sql.Int, day)
-        .input("StartTime", sql.Time, `${startTime}:00`)
-        .input("EndTime", sql.Time, `${endTime}:00`)
-        .input("UpdatedBy", sql.Int, actorUserId || null)
-        .query(`
-          INSERT INTO DoctorSchedules (DoctorID, DayOfWeek, StartTime, EndTime, SlotDurationMinutes, IsActive, UpdatedBy)
-          VALUES (@DoctorID, @DayOfWeek, @StartTime, @EndTime, 30, 1, @UpdatedBy)
-        `);
-    }
+      .input("UserID", sql.Int, userId)
+      .input("MRNumber", sql.NVarChar(50), normalizeOptional(profile?.mrNumber) || buildMrNumber(userId))
+      .input("DateOfBirth", sql.Date, normalizeOptional(profile?.dateOfBirth))
+      .input("Gender", sql.NVarChar(20), normalizeOptional(profile?.gender))
+      .input("BloodGroup", sql.NVarChar(10), normalizeOptional(profile?.bloodGroup))
+      .input("EmergencyContact", sql.NVarChar(50), normalizeOptional(profile?.emergencyContact))
+      .input("Allergies", sql.NVarChar(sql.MAX), normalizeOptional(profile?.allergies))
+      .input("ChronicConditions", sql.NVarChar(sql.MAX), normalizeOptional(profile?.chronicConditions))
+      .query(`
+        INSERT INTO Patients (UserID, MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions)
+        VALUES (@UserID, @MRNumber, @DateOfBirth, @Gender, @BloodGroup, @EmergencyContact, @Allergies, @ChronicConditions)
+      `);
     return;
   }
 
-  if (role === "Nurse") {
-    const departmentId = profile?.departmentId ? Number(profile.departmentId) : null;
-    const shiftTime = `${normalizeOptional(profile?.shiftStartTime) || "09:00"}-${normalizeOptional(profile?.shiftEndTime) || "17:00"}`;
+  await new sql.Request(transaction)
+    .input("UserID", sql.Int, userId)
+    .input("DateOfBirth", sql.Date, normalizeOptional(profile?.dateOfBirth))
+    .input("Gender", sql.NVarChar(20), normalizeOptional(profile?.gender))
+    .input("BloodGroup", sql.NVarChar(10), normalizeOptional(profile?.bloodGroup))
+    .input("EmergencyContact", sql.NVarChar(50), normalizeOptional(profile?.emergencyContact))
+    .input("Allergies", sql.NVarChar(sql.MAX), normalizeOptional(profile?.allergies))
+    .input("ChronicConditions", sql.NVarChar(sql.MAX), normalizeOptional(profile?.chronicConditions))
+    .query(`
+      UPDATE Patients
+      SET DateOfBirth = COALESCE(@DateOfBirth, DateOfBirth),
+          Gender = COALESCE(@Gender, Gender),
+          BloodGroup = @BloodGroup,
+          EmergencyContact = @EmergencyContact,
+          Allergies = @Allergies,
+          ChronicConditions = @ChronicConditions
+      WHERE UserID = @UserID
+    `);
+}
 
-    const existing = await new sql.Request(transaction)
-      .input("UserID", sql.Int, userId)
-      .query("SELECT NurseID, DepartmentID FROM Nurses WHERE UserID = @UserID");
+async function upsertDoctorProfile(transaction, userId, profile) {
+  const existing = await new sql.Request(transaction)
+    .input("UserID", sql.Int, userId)
+    .query("SELECT DoctorID FROM Doctors WHERE UserID = @UserID");
 
-    if (!existing.recordset[0]) {
-      await new sql.Request(transaction)
-        .input("UserID", sql.Int, userId)
-        .input("DepartmentID", sql.Int, departmentId)
-        .input("ShiftTime", sql.NVarChar(50), shiftTime)
-        .input("NurseType", sql.NVarChar(50), null)
-        .input("Certification", sql.NVarChar(150), null)
-        .query(`
-          INSERT INTO Nurses (UserID, DepartmentID, ShiftTime, NurseType, Certification)
-          VALUES (@UserID, @DepartmentID, @ShiftTime, @NurseType, @Certification)
-        `);
-    } else {
-      await new sql.Request(transaction)
-        .input("UserID", sql.Int, userId)
-        .input("DepartmentID", sql.Int, departmentId || existing.recordset[0].DepartmentID)
-        .input("ShiftTime", sql.NVarChar(50), shiftTime)
-        .input("NurseType", sql.NVarChar(50), null)
-        .input("Certification", sql.NVarChar(150), null)
-        .query(`
-          UPDATE Nurses
-          SET DepartmentID = @DepartmentID,
-              ShiftTime = @ShiftTime,
-              NurseType = @NurseType,
-              Certification = @Certification
-          WHERE UserID = @UserID
-        `);
-    }
+  const departmentId = profile?.departmentId ? Number(profile.departmentId) : null;
+  const specialization = normalizeOptional(profile?.specialization);
+  const qualification = normalizeOptional(profile?.qualification);
+  const designation = normalizeOptional(profile?.designation);
+  const consultationFee = Number(profile?.consultationFee || 0);
+  const shiftStartTime = normalizeOptional(profile?.startTime) || "09:00";
+  const shiftEndTime = normalizeOptional(profile?.endTime) || "17:00";
+  const workDays = normalizeWorkDays(profile?.scheduleDays);
+
+  const request = new sql.Request(transaction)
+    .input("UserID", sql.Int, userId)
+    .input("DepartmentID", sql.Int, departmentId)
+    .input("Specialization", sql.NVarChar(100), specialization)
+    .input("Qualification", sql.NVarChar(150), qualification)
+    .input("Designation", sql.NVarChar(100), designation)
+    .input("ConsultationFee", sql.Decimal(10, 2), consultationFee)
+    .input("ShiftStartTime", sql.NVarChar(8), `${shiftStartTime}:00`)
+    .input("ShiftEndTime", sql.NVarChar(8), `${shiftEndTime}:00`)
+    .input("WorkDays", sql.NVarChar(50), workDays);
+
+  if (!existing.recordset[0]) {
+    await request.query(`
+      INSERT INTO Doctors (UserID, DepartmentID, Specialization, Qualification, Designation, ConsultationFee, ShiftStartTime, ShiftEndTime, WorkDays)
+      VALUES (@UserID, @DepartmentID, @Specialization, @Qualification, @Designation, @ConsultationFee, @ShiftStartTime, @ShiftEndTime, @WorkDays)
+    `);
+    return;
   }
+
+  await request.query(`
+    UPDATE Doctors
+    SET DepartmentID = @DepartmentID,
+        Specialization = @Specialization,
+        Qualification = @Qualification,
+        Designation = @Designation,
+        ConsultationFee = @ConsultationFee,
+        ShiftStartTime = @ShiftStartTime,
+        ShiftEndTime = @ShiftEndTime,
+        WorkDays = @WorkDays
+    WHERE UserID = @UserID
+  `);
+}
+
+async function upsertNurseProfile(transaction, userId, profile) {
+  const existing = await new sql.Request(transaction)
+    .input("UserID", sql.Int, userId)
+    .query("SELECT NurseID, DepartmentID FROM Nurses WHERE UserID = @UserID");
+
+  const departmentId = profile?.departmentId ? Number(profile.departmentId) : existing.recordset[0]?.DepartmentID || null;
+  const shiftStartTime = normalizeOptional(profile?.shiftStartTime) || "09:00";
+  const shiftEndTime = normalizeOptional(profile?.shiftEndTime) || "17:00";
+
+  const request = new sql.Request(transaction)
+    .input("UserID", sql.Int, userId)
+    .input("DepartmentID", sql.Int, departmentId)
+    .input("ShiftStartTime", sql.NVarChar(8), `${shiftStartTime}:00`)
+    .input("ShiftEndTime", sql.NVarChar(8), `${shiftEndTime}:00`);
+
+  if (!existing.recordset[0]) {
+    await request.query(`
+      INSERT INTO Nurses (UserID, DepartmentID, ShiftStartTime, ShiftEndTime)
+      VALUES (@UserID, @DepartmentID, @ShiftStartTime, @ShiftEndTime)
+    `);
+    return;
+  }
+
+  await request.query(`
+    UPDATE Nurses
+    SET DepartmentID = @DepartmentID,
+        ShiftStartTime = @ShiftStartTime,
+        ShiftEndTime = @ShiftEndTime
+    WHERE UserID = @UserID
+  `);
+}
+
+async function upsertRoleProfile(transaction, userId, role, profile) {
+  if (role === "Patient") return upsertPatientProfile(transaction, userId, profile);
+  if (role === "Doctor") return upsertDoctorProfile(transaction, userId, profile);
+  if (role === "Nurse") return upsertNurseProfile(transaction, userId, profile);
 }
 
 const listUsers = asyncHandler(async (req, res) => {
@@ -259,119 +230,93 @@ const listUsers = asyncHandler(async (req, res) => {
 
 const getUser = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const baseResult = await pool
-    .request()
+  const user = await pool.request()
     .input("UserID", sql.Int, req.params.id)
-    .query(`
-      ${userSelect}
-      WHERE u.UserID = @UserID
-    `);
+    .query(`${userSelect} WHERE u.UserID = @UserID`);
 
-  if (!baseResult.recordset[0]) {
-    return res.status(404).json({ message: "User not found" });
+  if (!user.recordset[0]) return res.status(404).json({ message: "User not found" });
+  const row = user.recordset[0];
+
+  if (row.Role === "Patient") {
+    const profile = await pool.request()
+      .input("UserID", sql.Int, row.UserID)
+      .query("SELECT MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions FROM Patients WHERE UserID = @UserID");
+    row.Profile = profile.recordset[0] || {};
   }
 
-  const user = baseResult.recordset[0];
-  const profile = {};
-  if (user.Role === "Patient") {
-    const patientResult = await pool.request().input("UserID", sql.Int, user.UserID).query(`
-      SELECT MRNumber, DateOfBirth, Gender, BloodGroup, EmergencyContact, Allergies, ChronicConditions
-      FROM Patients
-      WHERE UserID = @UserID
-    `);
-    Object.assign(profile, patientResult.recordset[0] || {});
-  } else if (user.Role === "Doctor") {
-    const doctorResult = await pool.request().input("UserID", sql.Int, user.UserID).query(`
-      SELECT Specialization, Qualification, Designation, LicenseNumber, ExperienceYears, ConsultationFee, AvailableForOPD, AvailableForIPD
-      FROM Doctors
-      WHERE UserID = @UserID
-    `);
-    Object.assign(profile, doctorResult.recordset[0] || {});
-    if (user.DoctorID) {
-      const scheduleResult = await pool.request().input("DoctorID", sql.Int, user.DoctorID).query(`
-        SELECT DayOfWeek, StartTime, EndTime
-        FROM DoctorSchedules
-        WHERE DoctorID = @DoctorID AND IsActive = 1
-        ORDER BY DayOfWeek
+  if (row.Role === "Doctor") {
+    const profile = await pool.request()
+      .input("UserID", sql.Int, row.UserID)
+      .query(`
+        SELECT DepartmentID, Specialization, Qualification, Designation, ConsultationFee, ShiftStartTime, ShiftEndTime, WorkDays
+        FROM Doctors
+        WHERE UserID = @UserID
       `);
-      const rows = scheduleResult.recordset || [];
-      profile.ScheduleDays = rows.map((row) => row.DayOfWeek);
-      profile.StartTime = rows[0]?.StartTime ? String(rows[0].StartTime).slice(0, 5) : "";
-      profile.EndTime = rows[0]?.EndTime ? String(rows[0].EndTime).slice(0, 5) : "";
-    }
-  } else if (user.Role === "Nurse") {
-    const nurseResult = await pool.request().input("UserID", sql.Int, user.UserID).query(`
-      SELECT DepartmentID, ShiftTime, NurseType, Certification
-      FROM Nurses
-      WHERE UserID = @UserID
-    `);
-    Object.assign(profile, nurseResult.recordset[0] || {});
-    if (profile.ShiftTime && String(profile.ShiftTime).includes("-")) {
-      const [start, end] = String(profile.ShiftTime).split("-");
-      profile.ShiftStartTime = start;
-      profile.ShiftEndTime = end;
-    }
+    const doctor = profile.recordset[0] || {};
+    row.Profile = {
+      ...doctor,
+      StartTime: formatDbTime(doctor.ShiftStartTime),
+      EndTime: formatDbTime(doctor.ShiftEndTime),
+      ScheduleDays: String(doctor.WorkDays || "").split(",").filter(Boolean).map(Number)
+    };
   }
 
-  res.json({ ...user, profile });
+  if (row.Role === "Nurse") {
+    const profile = await pool.request()
+      .input("UserID", sql.Int, row.UserID)
+      .query("SELECT DepartmentID, ShiftStartTime, ShiftEndTime FROM Nurses WHERE UserID = @UserID");
+    const nurse = profile.recordset[0] || {};
+    row.Profile = {
+      ...nurse,
+      ShiftStartTime: formatDbTime(nurse.ShiftStartTime),
+      ShiftEndTime: formatDbTime(nurse.ShiftEndTime)
+    };
+  }
+
+  res.json(row);
 });
 
 const createUser = asyncHandler(async (req, res) => {
-  const {
-    fullName,
-    email,
-    password,
-    confirmPassword,
-    passwordConfirm,
-    role,
-    phone,
-    address,
-    profile
-  } = req.body;
-
+  const { fullName, email, password, confirmPassword, role, phone, address, profile = {} } = req.body;
   const errors = [];
-  if (!fullName) errors.push({ field: "fullName", message: "Full name is required" });
-  if (!email) errors.push({ field: "email", message: "Email is required" });
-  if (!role) errors.push({ field: "role", message: "Role is required" });
-  errors.push(...validateCreatePassword(password, confirmPassword || passwordConfirm));
-  if (role === "Admin") {
-    errors.push({ field: "role", message: "Admin users cannot be created from this flow" });
-  }
-
   const normalizedPhone = normalizePhone(phone);
-  if (phone && !isValidPakistanPhone(normalizedPhone)) {
-    errors.push({ field: "phone", message: "Phone must be 11 digits starting with 0 (e.g., 03001234567)" });
-  }
+  const normalizedRole = normalizeOptional(role);
 
-  const profileErrors = roleValidation(role, profile || {}, false, false);
-  if (profileErrors.length) errors.push(...profileErrors);
-  if (errors.length) {
-    return validationErrorResponse(res, errors, "User creation validation failed");
-  }
+  if (!normalizeOptional(fullName)) errors.push({ field: "fullName", message: "Full name is required" });
+  if (!normalizeOptional(email)) errors.push({ field: "email", message: "Email is required" });
+  if (!normalizedPhone || !isValidPakistanPhone(normalizedPhone)) errors.push({ field: "phone", message: "Phone must be 11 digits starting with 0 (e.g., 03001234567)" });
+  errors.push(...validateCreatePassword(password, confirmPassword));
+  errors.push(...roleValidation(normalizedRole, profile));
+  if (errors.length) return validationErrorResponse(res, errors, "User creation validation failed");
 
-  const hash = await bcrypt.hash(password, 10);
   const pool = await getPool();
+  const duplicate = await pool.request()
+    .input("Email", sql.NVarChar(255), email)
+    .query("SELECT UserID FROM Users WHERE Email = @Email");
+  if (duplicate.recordset[0]) return res.status(409).json({ message: "Email already exists" });
+
   const transaction = new sql.Transaction(pool);
   await transaction.begin();
 
   try {
-    const result = await new sql.Request(transaction)
-      .input("FullName", sql.NVarChar(120), fullName)
-      .input("Email", sql.NVarChar(150), String(email).toLowerCase())
+    const hash = await bcrypt.hash(password, 10);
+    const inserted = await new sql.Request(transaction)
+      .input("FullName", sql.NVarChar(150), fullName)
+      .input("Email", sql.NVarChar(255), email)
       .input("Password", sql.NVarChar(255), hash)
-      .input("Role", sql.NVarChar(30), role)
-      .input("Phone", sql.NVarChar(30), normalizedPhone)
-      .input("Address", sql.NVarChar(255), address || null)
+      .input("Role", sql.NVarChar(50), normalizedRole)
+      .input("Phone", sql.NVarChar(20), normalizedPhone)
+      .input("Address", sql.NVarChar(255), normalizeOptional(address))
       .query(`
-        INSERT INTO Users (FullName, Email, Password, Role, Phone, Address)
-        OUTPUT INSERTED.UserID, INSERTED.FullName, INSERTED.Email, INSERTED.Role, INSERTED.Phone, INSERTED.Address, INSERTED.CreatedAt, INSERTED.IsActive
-        VALUES (@FullName, @Email, @Password, @Role, @Phone, @Address)
+        INSERT INTO Users (FullName, Email, Password, Role, Phone, Address, IsActive)
+        OUTPUT INSERTED.UserID
+        VALUES (@FullName, @Email, @Password, @Role, @Phone, @Address, 1)
       `);
 
-    const user = result.recordset[0];
-    await upsertRoleProfile(transaction, user.UserID, role, profile || {}, req.user?.userId);
+    const userId = inserted.recordset[0].UserID;
+    await upsertRoleProfile(transaction, userId, normalizedRole, profile);
     await transaction.commit();
-    res.status(201).json(user);
+    res.status(201).json({ message: "User created", userId });
   } catch (error) {
     await transaction.rollback();
     throw error;
@@ -379,43 +324,51 @@ const createUser = asyncHandler(async (req, res) => {
 });
 
 const updateUser = asyncHandler(async (req, res) => {
-  const { fullName, email, password, role, phone, address, isActive, profile } = req.body;
-
+  const { fullName, email, role, phone, address, isActive, newPassword, confirmNewPassword, profile = {} } = req.body;
   const errors = [];
-  if (!fullName) errors.push({ field: "fullName", message: "Full name is required" });
-  if (!email) errors.push({ field: "email", message: "Email is required" });
-  if (!role) errors.push({ field: "role", message: "Role is required" });
-
+  const normalizedRole = normalizeOptional(role);
   const normalizedPhone = normalizePhone(phone);
-  if (phone && !isValidPakistanPhone(normalizedPhone)) {
-    errors.push({ field: "phone", message: "Phone must be 11 digits starting with 0 (e.g., 03001234567)" });
-  }
 
-  const profileErrors = roleValidation(role, profile || {}, true, true);
-  if (profileErrors.length) errors.push(...profileErrors);
-  if (errors.length) {
-    return validationErrorResponse(res, errors, "User update validation failed");
+  if (!normalizeOptional(fullName)) errors.push({ field: "fullName", message: "Full name is required" });
+  if (!normalizeOptional(email)) errors.push({ field: "email", message: "Email is required" });
+  if (!normalizedPhone || !isValidPakistanPhone(normalizedPhone)) errors.push({ field: "phone", message: "Phone must be 11 digits starting with 0 (e.g., 03001234567)" });
+  if (newPassword || confirmNewPassword) {
+    const passwordErrors = validateCreatePassword(newPassword, confirmNewPassword).map((error) => ({
+      field: error.field === "password" ? "newPassword" : "confirmNewPassword",
+      message: error.message
+    }));
+    errors.push(...passwordErrors);
   }
+  errors.push(...roleValidation(normalizedRole, profile, true, true));
+  if (normalizedRole === "Admin") errors.push({ field: "role", message: "The original admin account cannot be edited into another flow here" });
+  if (errors.length) return validationErrorResponse(res, errors);
 
   const pool = await getPool();
+  const existing = await pool.request()
+    .input("UserID", sql.Int, req.params.id)
+    .query("SELECT UserID, Role FROM Users WHERE UserID = @UserID");
+  if (!existing.recordset[0]) return res.status(404).json({ message: "User not found" });
+
   const transaction = new sql.Transaction(pool);
   await transaction.begin();
-  const request = new sql.Request(transaction)
-    .input("UserID", sql.Int, req.params.id)
-    .input("FullName", sql.NVarChar(120), fullName)
-    .input("Email", sql.NVarChar(150), String(email).toLowerCase())
-    .input("Role", sql.NVarChar(30), role)
-    .input("Phone", sql.NVarChar(30), normalizedPhone)
-    .input("Address", sql.NVarChar(255), address || null)
-    .input("IsActive", sql.Bit, isActive === undefined ? true : Boolean(isActive));
-
-  const passwordSql = password ? ", Password = @Password" : "";
-  if (password) {
-    request.input("Password", sql.NVarChar(255), await bcrypt.hash(password, 10));
-  }
 
   try {
-    const result = await request.query(`
+    const request = new sql.Request(transaction)
+      .input("UserID", sql.Int, req.params.id)
+      .input("FullName", sql.NVarChar(150), fullName)
+      .input("Email", sql.NVarChar(255), email)
+      .input("Role", sql.NVarChar(50), normalizedRole)
+      .input("Phone", sql.NVarChar(20), normalizedPhone)
+      .input("Address", sql.NVarChar(255), normalizeOptional(address))
+      .input("IsActive", sql.Bit, isActive === undefined ? true : Boolean(isActive));
+
+    let passwordSql = "";
+    if (newPassword) {
+      request.input("Password", sql.NVarChar(255), await bcrypt.hash(newPassword, 10));
+      passwordSql = ", Password = @Password";
+    }
+
+    await request.query(`
       UPDATE Users
       SET FullName = @FullName,
           Email = @Email,
@@ -424,19 +377,12 @@ const updateUser = asyncHandler(async (req, res) => {
           Address = @Address,
           IsActive = @IsActive
           ${passwordSql}
-      OUTPUT INSERTED.UserID, INSERTED.FullName, INSERTED.Email, INSERTED.Role,
-             INSERTED.Phone, INSERTED.Address, INSERTED.CreatedAt, INSERTED.IsActive
       WHERE UserID = @UserID
     `);
 
-    if (!result.recordset[0]) {
-      await transaction.rollback();
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    await upsertRoleProfile(transaction, Number(req.params.id), role, profile || {}, req.user?.userId);
+    await upsertRoleProfile(transaction, Number(req.params.id), normalizedRole, profile);
     await transaction.commit();
-    res.json(result.recordset[0]);
+    res.json({ message: "User updated" });
   } catch (error) {
     await transaction.rollback();
     throw error;
@@ -445,22 +391,18 @@ const updateUser = asyncHandler(async (req, res) => {
 
 const deleteUser = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("UserID", sql.Int, req.params.id)
-    .query(`
-      UPDATE Users
-      SET IsActive = 0
-      OUTPUT INSERTED.UserID, INSERTED.FullName, INSERTED.Email, INSERTED.Role,
-             INSERTED.Phone, INSERTED.Address, INSERTED.CreatedAt, INSERTED.IsActive
-      WHERE UserID = @UserID
-    `);
+    .query("UPDATE Users SET IsActive = 0 OUTPUT INSERTED.UserID WHERE UserID = @UserID AND Role <> 'Admin'");
 
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "User not found" });
-  }
-
-  res.json(result.recordset[0]);
+  if (!result.recordset[0]) return res.status(404).json({ message: "User not found or cannot deactivate admin" });
+  res.json({ message: "User deactivated" });
 });
 
-module.exports = { listUsers, getUser, createUser, updateUser, deleteUser };
+module.exports = {
+  listUsers,
+  getUser,
+  createUser,
+  updateUser,
+  deleteUser
+};

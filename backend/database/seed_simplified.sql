@@ -1,6 +1,10 @@
 USE HealthUp;
 GO
 
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+GO
+
 DECLARE @PasswordHash NVARCHAR(255) = '$2a$10$9nZd2vdC9w6XWcteRzOAQOmZC4r.xpjxBGDbQM8Jn9NvqA.4pgbQa';
 
 IF NOT EXISTS (SELECT 1 FROM Users WHERE Email = 'admin@healthup.test')

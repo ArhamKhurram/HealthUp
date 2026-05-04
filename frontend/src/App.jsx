@@ -1,3 +1,4 @@
+// Role-aware shell and top-level route/view switch for the frontend.
 import React, { useEffect, useMemo, useState } from "react";
 import { HeartPulse, LogOut, ShieldAlert } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
@@ -9,35 +10,24 @@ import {
   AdmitPatientPage,
   AdminDashboard,
   AppointmentDetails,
-  AssignedWardPage,
-  AssignBedPage,
-  BedStatusPage,
   BookAppointment,
   DepartmentsManagement,
   DoctorDashboard,
   DoctorAppointments,
-  DutyRosterManagement,
-  EquipmentManagement,
   IpdPatientDetailsPage,
   IpdPatients,
   ManageUsersPage,
   MyAdmissions,
   MyAppointments,
   MyPrescriptions,
-  MyTestOrders,
   NurseDashboard,
-  NurseDutyRosterPage,
-  OpdRoomsManagement,
-  OrderIpdTestsPage,
-  OrderOpdTests,
   PatientDashboard,
   PaymentsPage,
   ProfilePage,
   ProgressNotesPage,
   ReceptionDashboard,
   SubmitReview,
-  ViewReviewsPage,
-  WardsBedsManagement
+  ViewReviewsPage
 } from "./pages/RolePages";
 
 function App() {
@@ -86,12 +76,6 @@ function App() {
         return <ManageUsersPage />;
       case "departments":
         return <DepartmentsManagement />;
-      case "wardsBeds":
-        return <WardsBedsManagement />;
-      case "opdRooms":
-        return <OpdRoomsManagement />;
-      case "equipment":
-        return <EquipmentManagement />;
       case "bookAppointment":
         return <BookAppointment user={user} />;
       case "doctorAppointments":
@@ -102,8 +86,6 @@ function App() {
         return <AppointmentDetails user={user} />;
       case "addPrescription":
         return <AddPrescription user={user} />;
-      case "orderOpdTests":
-        return <OrderOpdTests user={user} />;
       case "ipdPatients":
         return <IpdPatients user={user} />;
       case "ipdPatientDetails":
@@ -112,8 +94,6 @@ function App() {
         return <ProgressNotesPage user={user} />;
       case "ipdPrescription":
         return <AddIpdPrescriptionPage user={user} />;
-      case "orderIpdTests":
-        return <OrderIpdTestsPage user={user} />;
       case "viewReviews":
         return <ViewReviewsPage />;
       case "patientDashboard":
@@ -122,8 +102,6 @@ function App() {
         return <MyAppointments user={user} />;
       case "myPrescriptions":
         return <MyPrescriptions user={user} />;
-      case "myTestOrders":
-        return <MyTestOrders user={user} />;
       case "myAdmissions":
         return <MyAdmissions user={user} />;
       case "payments":
@@ -132,18 +110,10 @@ function App() {
         return <SubmitReview user={user} />;
       case "nurseDashboard":
         return <NurseDashboard />;
-      case "assignedWard":
-        return <AssignedWardPage />;
-      case "bedStatus":
-        return <BedStatusPage />;
-      case "dutyRoster":
-        return user.role === "Nurse" ? <NurseDutyRosterPage user={user} /> : <DutyRosterManagement />;
       case "receptionDashboard":
         return <ReceptionDashboard />;
       case "receptionAdmitPatient":
         return <AdmitPatientPage />;
-      case "receptionAssignBed":
-        return <AssignBedPage />;
       case "profile":
         return <ProfilePage user={user} />;
       default:

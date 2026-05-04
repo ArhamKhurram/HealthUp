@@ -1,3 +1,4 @@
+// Billing routes for OPD/IPD payments and line-item details.
 const router = require("express").Router();
 const {
   listOPDPayments,

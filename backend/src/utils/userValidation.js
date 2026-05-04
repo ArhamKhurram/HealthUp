@@ -1,3 +1,4 @@
+// Shared user/profile validation helpers used by auth and admin user flows.
 const PAKISTAN_MOBILE_REGEX = /^03\d{9}$/;
 const MIN_PASSWORD_LENGTH = 8;
 

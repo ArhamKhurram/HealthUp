@@ -1,432 +1,156 @@
+// Billing controller.
+// OPD and IPD endpoints are preserved, but both now write to the unified Payments/BillingDetails tables.
 const { sql, getPool } = require("../config/db");
 const asyncHandler = require("../utils/asyncHandler");
-const PAYMENT_STATUSES = ["Pending", "Paid", "Rejected"];
-const APPOINTMENT_STATUSES = ["Pending", "PendingPayment", "Confirmed", "CheckedIn", "Completed", "Cancelled"];
 
-const derivePaymentStatus = (status, paidAmount, totalAmount) => {
-  if (status && !PAYMENT_STATUSES.includes(status)) return { ok: false };
-  if (status) return { ok: true, status };
-  return { ok: true, status: Number(paidAmount || 0) >= Number(totalAmount || 0) ? "Paid" : "Pending" };
-};
+function paymentSelect(kind, whereClause = "") {
+  const sourceJoin = kind === "OPD"
+    ? "LEFT JOIN OPDAppointments a ON a.AppointmentID = pay.AppointmentID"
+    : "LEFT JOIN IPDAdmissions a ON a.AdmissionID = pay.AdmissionID";
+  const sourceColumn = kind === "OPD" ? "pay.AppointmentID" : "pay.AdmissionID";
 
-const syncAppointmentStatusFromPayment = async ({ pool, appointmentId, paymentStatus, paidAmount, totalAmount }) => {
-  const appointmentResult = await pool
-    .request()
-    .input("AppointmentID", sql.Int, appointmentId)
-    .query("SELECT AppointmentID, Status FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
-  const appointment = appointmentResult.recordset[0];
-  if (!appointment) return { ok: false, code: 404, message: "Appointment not found" };
-  if (["Completed", "Cancelled"].includes(appointment.Status)) {
-    return { ok: false, code: 409, message: `Cannot update payment for ${appointment.Status.toLowerCase()} appointment` };
-  }
-  if (!APPOINTMENT_STATUSES.includes(appointment.Status)) {
-    return { ok: false, code: 409, message: "Appointment status is invalid for payment progression" };
-  }
+  return `
+    SELECT pay.PaymentID, pay.PatientID, ${sourceColumn} AS ${kind === "OPD" ? "AppointmentID" : "AdmissionID"},
+           pay.TotalAmount, pay.PaidAmount, pay.Status, pay.PaymentMethod, pay.ReferenceNo,
+           pay.ReceivedByUserID, pay.PaidAt, pay.CreatedAt,
+           pu.FullName AS PatientName,
+           ru.FullName AS ReceivedByName
+    FROM Payments pay
+    INNER JOIN Patients p ON p.PatientID = pay.PatientID
+    INNER JOIN Users pu ON pu.UserID = p.UserID
+    ${sourceJoin}
+    LEFT JOIN Users ru ON ru.UserID = pay.ReceivedByUserID
+    ${whereClause}
+  `;
+}
 
-  let nextAppointmentStatus = appointment.Status;
-  if (paymentStatus === "Paid" && Number(paidAmount || 0) >= Number(totalAmount || 0)) {
-    if (appointment.Status === "Pending" || appointment.Status === "PendingPayment") {
-      nextAppointmentStatus = "Confirmed";
+async function createPayment(req, res, kind) {
+  const pool = await getPool();
+  const sourceField = kind === "OPD" ? "appointmentId" : "admissionId";
+  const sourceColumn = kind === "OPD" ? "AppointmentID" : "AdmissionID";
+  const { patientId, totalAmount, paidAmount, status, paymentMethod, referenceNo, details = [] } = req.body;
+
+  const transaction = new sql.Transaction(pool);
+  await transaction.begin();
+
+  try {
+    const inserted = await new sql.Request(transaction)
+      .input("PatientID", sql.Int, patientId)
+      .input(sourceColumn, sql.Int, req.body[sourceField])
+      .input("TotalAmount", sql.Decimal(10, 2), Number(totalAmount || 0))
+      .input("PaidAmount", sql.Decimal(10, 2), Number(paidAmount || totalAmount || 0))
+      .input("Status", sql.NVarChar(30), status || "Paid")
+      .input("PaymentMethod", sql.NVarChar(50), paymentMethod || "Cash")
+      .input("ReferenceNo", sql.NVarChar(80), referenceNo || null)
+      .input("ReceivedByUserID", sql.Int, req.user?.userId || null)
+      .query(`
+        INSERT INTO Payments (PatientID, ${sourceColumn}, TotalAmount, PaidAmount, Status, PaymentMethod, ReferenceNo, ReceivedByUserID, PaidAt)
+        OUTPUT INSERTED.*
+        VALUES (@PatientID, @${sourceColumn}, @TotalAmount, @PaidAmount, @Status, @PaymentMethod, @ReferenceNo, @ReceivedByUserID, SYSDATETIME())
+      `);
+
+    const paymentId = inserted.recordset[0].PaymentID;
+    for (const detail of details) {
+      await new sql.Request(transaction)
+        .input("PaymentID", sql.Int, paymentId)
+        .input("ItemType", sql.NVarChar(50), detail.itemType || "Service")
+        .input("ItemDescription", sql.NVarChar(255), detail.itemDescription || detail.description || "Hospital service")
+        .input("Quantity", sql.Int, Number(detail.quantity || 1))
+        .input("UnitPrice", sql.Decimal(10, 2), Number(detail.unitPrice || detail.amount || 0))
+        .query(`
+          INSERT INTO BillingDetails (PaymentID, ItemType, ItemDescription, Quantity, UnitPrice)
+          VALUES (@PaymentID, @ItemType, @ItemDescription, @Quantity, @UnitPrice)
+        `);
     }
-  } else if (paymentStatus === "Pending" || paymentStatus === "Rejected") {
-    if (appointment.Status === "Pending" || appointment.Status === "Confirmed" || appointment.Status === "PendingPayment") {
-      nextAppointmentStatus = "PendingPayment";
-    }
+
+    await transaction.commit();
+    res.status(201).json(inserted.recordset[0]);
+  } catch (error) {
+    await transaction.rollback();
+    throw error;
   }
+}
 
-  if (nextAppointmentStatus !== appointment.Status) {
-    await pool
-      .request()
-      .input("AppointmentID", sql.Int, appointmentId)
-      .input("Status", sql.NVarChar(30), nextAppointmentStatus)
-      .query("UPDATE OPDAppointments SET Status = @Status WHERE AppointmentID = @AppointmentID");
-  }
+async function updatePayment(req, res, kind) {
+  const sourceColumn = kind === "OPD" ? "AppointmentID" : "AdmissionID";
+  const sourceBody = kind === "OPD" ? "appointmentId" : "admissionId";
+  const { patientId, totalAmount, paidAmount, status, paymentMethod, referenceNo } = req.body;
+  const pool = await getPool();
+  const result = await pool.request()
+    .input("PaymentID", sql.Int, req.params.id)
+    .input("PatientID", sql.Int, patientId)
+    .input(sourceColumn, sql.Int, req.body[sourceBody])
+    .input("TotalAmount", sql.Decimal(10, 2), Number(totalAmount || 0))
+    .input("PaidAmount", sql.Decimal(10, 2), Number(paidAmount || 0))
+    .input("Status", sql.NVarChar(30), status || "Paid")
+    .input("PaymentMethod", sql.NVarChar(50), paymentMethod || "Cash")
+    .input("ReferenceNo", sql.NVarChar(80), referenceNo || null)
+    .input("ReceivedByUserID", sql.Int, req.user?.userId || null)
+    .query(`
+      UPDATE Payments
+      SET PatientID = @PatientID,
+          ${sourceColumn} = @${sourceColumn},
+          TotalAmount = @TotalAmount,
+          PaidAmount = @PaidAmount,
+          Status = @Status,
+          PaymentMethod = @PaymentMethod,
+          ReferenceNo = @ReferenceNo,
+          ReceivedByUserID = @ReceivedByUserID,
+          PaidAt = CASE WHEN @Status = 'Paid' THEN COALESCE(PaidAt, SYSDATETIME()) ELSE PaidAt END
+      OUTPUT INSERTED.*
+      WHERE PaymentID = @PaymentID AND ${sourceColumn} IS NOT NULL
+    `);
 
-  return { ok: true };
-};
+  if (!result.recordset[0]) return res.status(404).json({ message: "Payment not found" });
+  res.json(result.recordset[0]);
+}
 
-const getActorPatientId = async (pool, userId) => {
-  const result = await pool
-    .request()
-    .input("UserID", sql.Int, userId)
-    .query("SELECT TOP 1 PatientID FROM Patients WHERE UserID = @UserID");
-  return result.recordset[0]?.PatientID || null;
-};
+async function deletePayment(req, res, sourceColumn) {
+  const pool = await getPool();
+  const result = await pool.request()
+    .input("PaymentID", sql.Int, req.params.id)
+    .query(`DELETE FROM Payments OUTPUT DELETED.PaymentID WHERE PaymentID = @PaymentID AND ${sourceColumn} IS NOT NULL`);
+  if (!result.recordset[0]) return res.status(404).json({ message: "Payment not found" });
+  res.json({ message: "Payment deleted" });
+}
 
 const listOPDPayments = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const request = pool.request();
-  let whereClause = "";
-  if (req.user.role === "Patient") {
-    const patientId = await getActorPatientId(pool, req.user.userId);
-    if (!patientId) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, patientId);
-    whereClause = "WHERE pay.PatientID = @ActorPatientID";
-  }
-  const result = await request.query(`
-    SELECT pay.PaymentID, pay.AppointmentID, pay.PatientID, pay.TotalAmount,
-           pay.PaidAmount, pay.Status, u.FullName AS PatientName
-    FROM OPDPayments pay
-    INNER JOIN Patients p ON p.PatientID = pay.PatientID
-    INNER JOIN Users u ON u.UserID = p.UserID
-    ${whereClause}
-    ORDER BY pay.PaymentID DESC
-  `);
+  const result = await pool.request().query(`${paymentSelect("OPD", "WHERE pay.AppointmentID IS NOT NULL")} ORDER BY pay.CreatedAt DESC`);
   res.json(result.recordset);
 });
 
 const getOPDPayment = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const request = pool.request().input("PaymentID", sql.Int, req.params.id);
-  let whereClause = "WHERE PaymentID = @PaymentID";
-  if (req.user.role === "Patient") {
-    const patientId = await getActorPatientId(pool, req.user.userId);
-    if (!patientId) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, patientId);
-    whereClause += " AND PatientID = @ActorPatientID";
-  }
-  const result = await request.query(`
-      SELECT *
-      FROM OPDPayments
-      ${whereClause}
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "OPD payment not found" });
-  }
-
+  const result = await pool.request()
+    .input("PaymentID", sql.Int, req.params.id)
+    .query(`${paymentSelect("OPD", "WHERE pay.PaymentID = @PaymentID AND pay.AppointmentID IS NOT NULL")}`);
+  if (!result.recordset[0]) return res.status(404).json({ message: "Payment not found" });
   res.json(result.recordset[0]);
 });
 
-const createOPDPayment = asyncHandler(async (req, res) => {
-  const { appointmentId, patientId, totalAmount, paidAmount, details } = req.body;
-
-  if (!appointmentId || !patientId) {
-    return res.status(400).json({ message: "Appointment and patient are required" });
-  }
-
-  if (!Array.isArray(details) || details.length === 0 || details.length > 2) {
-    return res.status(400).json({ message: "Provide 1 or 2 billing detail items in details[]" });
-  }
-
-  const first = details[0];
-  const second = details[1] || null;
-  if (!first.itemType || first.amount === undefined) {
-    return res.status(400).json({ message: "Each detail requires itemType and amount" });
-  }
-
-  const pool = await getPool();
-  const appointmentCheck = await pool
-    .request()
-    .input("AppointmentID", sql.Int, appointmentId)
-    .query("SELECT AppointmentID, PatientID FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
-  const appointment = appointmentCheck.recordset[0];
-  if (!appointment) return res.status(404).json({ message: "Appointment not found" });
-  if (Number(appointment.PatientID) !== Number(patientId)) {
-    return res.status(400).json({ message: "Payment patient must match appointment patient" });
-  }
-
-  const normalizedPaid = Number(paidAmount || 0);
-  const normalizedTotal = Number(totalAmount || 0);
-  const statusResolution = derivePaymentStatus(null, normalizedPaid, normalizedTotal);
-  const created = await pool
-    .request()
-    .input("AppointmentID", sql.Int, appointmentId)
-    .input("PatientID", sql.Int, patientId)
-    .input("TotalAmount", sql.Decimal(10, 2), normalizedTotal)
-    .input("PaidAmount", sql.Decimal(10, 2), normalizedPaid)
-    .input("ItemType1", sql.NVarChar(80), first.itemType)
-    .input("Amount1", sql.Decimal(10, 2), first.amount)
-    .input("Quantity1", sql.Int, first.quantity || 1)
-    .input("ItemType2", sql.NVarChar(80), second?.itemType || null)
-    .input("Amount2", sql.Decimal(10, 2), second?.amount || null)
-    .input("Quantity2", sql.Int, second?.quantity || 1)
-    .query(`
-      EXEC sp_CreateOPDPaymentWithDetails
-        @AppointmentID = @AppointmentID,
-        @PatientID = @PatientID,
-        @TotalAmount = @TotalAmount,
-        @PaidAmount = @PaidAmount,
-        @ItemType1 = @ItemType1,
-        @Amount1 = @Amount1,
-        @Quantity1 = @Quantity1,
-        @ItemType2 = @ItemType2,
-        @Amount2 = @Amount2,
-        @Quantity2 = @Quantity2
-    `);
-
-  const paymentId = created.recordset[0]?.PaymentID;
-  const appointmentSync = await syncAppointmentStatusFromPayment({
-    pool,
-    appointmentId,
-    paymentStatus: statusResolution.status,
-    paidAmount: normalizedPaid,
-    totalAmount: normalizedTotal
-  });
-  if (!appointmentSync.ok) {
-    return res.status(appointmentSync.code).json({ message: appointmentSync.message });
-  }
-  const result = await pool
-    .request()
-    .input("PaymentID", sql.Int, paymentId)
-    .query("SELECT * FROM OPDPayments WHERE PaymentID = @PaymentID");
-
-  res.status(201).json(result.recordset[0]);
-});
-
-const updateOPDPayment = asyncHandler(async (req, res) => {
-  const { appointmentId, patientId, totalAmount, paidAmount, status } = req.body;
-  const pool = await getPool();
-  const existingResult = await pool
-    .request()
-    .input("PaymentID", sql.Int, req.params.id)
-    .query("SELECT * FROM OPDPayments WHERE PaymentID = @PaymentID");
-  const existing = existingResult.recordset[0];
-  if (!existing) {
-    return res.status(404).json({ message: "OPD payment not found" });
-  }
-
-  const nextAppointmentId = appointmentId || existing.AppointmentID;
-  const nextPatientId = patientId || existing.PatientID;
-  const nextTotalAmount = totalAmount !== undefined ? Number(totalAmount) : Number(existing.TotalAmount);
-  const nextPaidAmount = paidAmount !== undefined ? Number(paidAmount) : Number(existing.PaidAmount);
-  if (!nextAppointmentId || !nextPatientId) {
-    return res.status(400).json({ message: "Appointment and patient are required" });
-  }
-  const statusResolution = derivePaymentStatus(status, nextPaidAmount, nextTotalAmount);
-  if (!statusResolution.ok) {
-    return res.status(400).json({ message: "Invalid payment status" });
-  }
-
-  const appointmentCheck = await pool
-    .request()
-    .input("AppointmentID", sql.Int, nextAppointmentId)
-    .query("SELECT AppointmentID, PatientID FROM OPDAppointments WHERE AppointmentID = @AppointmentID");
-  const appointment = appointmentCheck.recordset[0];
-  if (!appointment) return res.status(404).json({ message: "Appointment not found" });
-  if (Number(appointment.PatientID) !== Number(nextPatientId)) {
-    return res.status(400).json({ message: "Payment patient must match appointment patient" });
-  }
-
-  const result = await pool
-    .request()
-    .input("PaymentID", sql.Int, req.params.id)
-    .input("AppointmentID", sql.Int, nextAppointmentId)
-    .input("PatientID", sql.Int, nextPatientId)
-    .input("TotalAmount", sql.Decimal(10, 2), nextTotalAmount)
-    .input("PaidAmount", sql.Decimal(10, 2), nextPaidAmount)
-    .input("Status", sql.NVarChar(30), statusResolution.status)
-    .query(`
-      UPDATE OPDPayments
-      SET AppointmentID = @AppointmentID,
-          PatientID = @PatientID,
-          TotalAmount = @TotalAmount,
-          PaidAmount = @PaidAmount,
-          Status = @Status
-      OUTPUT INSERTED.*
-      WHERE PaymentID = @PaymentID
-    `);
-
-  const latestPayment = await pool
-    .request()
-    .input("PaymentID", sql.Int, req.params.id)
-    .query("SELECT PaymentID, AppointmentID, TotalAmount, PaidAmount, Status FROM OPDPayments WHERE PaymentID = @PaymentID");
-  const savedPayment = latestPayment.recordset[0];
-  const appointmentSync = await syncAppointmentStatusFromPayment({
-    pool,
-    appointmentId: savedPayment.AppointmentID,
-    paymentStatus: savedPayment.Status,
-    paidAmount: Number(savedPayment.PaidAmount),
-    totalAmount: Number(savedPayment.TotalAmount)
-  });
-  if (!appointmentSync.ok) {
-    return res.status(appointmentSync.code).json({ message: appointmentSync.message });
-  }
-
-  res.json(result.recordset[0]);
-});
-
-const deleteOPDPayment = asyncHandler(async (req, res) => {
-  const pool = await getPool();
-  const result = await pool
-    .request()
-    .input("PaymentID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM OPDPayments
-      OUTPUT DELETED.*
-      WHERE PaymentID = @PaymentID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "OPD payment not found" });
-  }
-
-  res.json(result.recordset[0]);
-});
+const createOPDPayment = asyncHandler((req, res) => createPayment(req, res, "OPD"));
+const updateOPDPayment = asyncHandler((req, res) => updatePayment(req, res, "OPD"));
+const deleteOPDPayment = asyncHandler((req, res) => deletePayment(req, res, "AppointmentID"));
 
 const listIPDPayments = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const request = pool.request();
-  let whereClause = "";
-  if (req.user.role === "Patient") {
-    const patientId = await getActorPatientId(pool, req.user.userId);
-    if (!patientId) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, patientId);
-    whereClause = "WHERE pay.PatientID = @ActorPatientID";
-  }
-  const result = await request.query(`
-    SELECT pay.PaymentID, pay.AdmissionID, pay.PatientID, pay.TotalAmount,
-           pay.PaidAmount, pay.Status, u.FullName AS PatientName
-    FROM IPDPayments pay
-    INNER JOIN Patients p ON p.PatientID = pay.PatientID
-    INNER JOIN Users u ON u.UserID = p.UserID
-    ${whereClause}
-    ORDER BY pay.PaymentID DESC
-  `);
-
+  const result = await pool.request().query(`${paymentSelect("IPD", "WHERE pay.AdmissionID IS NOT NULL")} ORDER BY pay.CreatedAt DESC`);
   res.json(result.recordset);
 });
 
 const getIPDPayment = asyncHandler(async (req, res) => {
   const pool = await getPool();
-  const request = pool.request().input("PaymentID", sql.Int, req.params.id);
-  let whereClause = "WHERE PaymentID = @PaymentID";
-  if (req.user.role === "Patient") {
-    const patientId = await getActorPatientId(pool, req.user.userId);
-    if (!patientId) return res.status(403).json({ message: "Patient profile is required" });
-    request.input("ActorPatientID", sql.Int, patientId);
-    whereClause += " AND PatientID = @ActorPatientID";
-  }
-  const result = await request.query(`
-      SELECT *
-      FROM IPDPayments
-      ${whereClause}
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "IPD payment not found" });
-  }
-
-  res.json(result.recordset[0]);
-});
-
-const createIPDPayment = asyncHandler(async (req, res) => {
-  const { admissionId, patientId, totalAmount, paidAmount, details } = req.body;
-
-  if (!admissionId || !patientId) {
-    return res.status(400).json({ message: "Admission and patient are required" });
-  }
-
-  const pool = await getPool();
-  const admissionCheck = await pool
-    .request()
-    .input("AdmissionID", sql.Int, admissionId)
-    .query("SELECT AdmissionID, PatientID FROM IPDAdmissions WHERE AdmissionID = @AdmissionID");
-  const admission = admissionCheck.recordset[0];
-  if (!admission) return res.status(404).json({ message: "Admission not found" });
-  if (Number(admission.PatientID) !== Number(patientId)) {
-    return res.status(400).json({ message: "Payment patient must match admission patient" });
-  }
-
-  if (!Array.isArray(details) || details.length === 0 || details.length > 2) {
-    return res.status(400).json({ message: "Provide 1 or 2 billing detail items in details[]" });
-  }
-  const first = details[0];
-  const second = details[1] || null;
-  if (!first.itemType || first.amount === undefined) {
-    return res.status(400).json({ message: "Each detail requires itemType and amount" });
-  }
-
-  const created = await pool
-    .request()
-    .input("AdmissionID", sql.Int, admissionId)
-    .input("PatientID", sql.Int, patientId)
-    .input("TotalAmount", sql.Decimal(10, 2), totalAmount || 0)
-    .input("PaidAmount", sql.Decimal(10, 2), paidAmount || 0)
-    .input("ItemType1", sql.NVarChar(80), first.itemType)
-    .input("Amount1", sql.Decimal(10, 2), first.amount)
-    .input("Quantity1", sql.Int, first.quantity || 1)
-    .input("ItemType2", sql.NVarChar(80), second?.itemType || null)
-    .input("Amount2", sql.Decimal(10, 2), second?.amount || null)
-    .input("Quantity2", sql.Int, second?.quantity || 1)
-    .query(`
-      EXEC sp_CreateIPDPaymentWithDetails
-        @AdmissionID = @AdmissionID,
-        @PatientID = @PatientID,
-        @TotalAmount = @TotalAmount,
-        @PaidAmount = @PaidAmount,
-        @ItemType1 = @ItemType1,
-        @Amount1 = @Amount1,
-        @Quantity1 = @Quantity1,
-        @ItemType2 = @ItemType2,
-        @Amount2 = @Amount2,
-        @Quantity2 = @Quantity2
-    `);
-
-  const paymentId = created.recordset[0]?.PaymentID;
-  const result = await pool
-    .request()
-    .input("PaymentID", sql.Int, paymentId)
-    .query("SELECT * FROM IPDPayments WHERE PaymentID = @PaymentID");
-
-  res.status(201).json(result.recordset[0]);
-});
-
-const updateIPDPayment = asyncHandler(async (req, res) => {
-  const { admissionId, patientId, totalAmount, paidAmount, status } = req.body;
-
-  if (!admissionId || !patientId) {
-    return res.status(400).json({ message: "Admission and patient are required" });
-  }
-
-  if (status && !PAYMENT_STATUSES.includes(status)) {
-    return res.status(400).json({ message: "Invalid payment status" });
-  }
-  const normalizedStatus = status || (Number(paidAmount || 0) >= Number(totalAmount || 0) ? "Paid" : "Pending");
-  const pool = await getPool();
-  const result = await pool
-    .request()
+  const result = await pool.request()
     .input("PaymentID", sql.Int, req.params.id)
-    .input("AdmissionID", sql.Int, admissionId)
-    .input("PatientID", sql.Int, patientId)
-    .input("TotalAmount", sql.Decimal(10, 2), totalAmount || 0)
-    .input("PaidAmount", sql.Decimal(10, 2), paidAmount || 0)
-    .input("Status", sql.NVarChar(30), normalizedStatus)
-    .query(`
-      UPDATE IPDPayments
-      SET AdmissionID = @AdmissionID,
-          PatientID = @PatientID,
-          TotalAmount = @TotalAmount,
-          PaidAmount = @PaidAmount,
-          Status = @Status
-      OUTPUT INSERTED.*
-      WHERE PaymentID = @PaymentID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "IPD payment not found" });
-  }
-
+    .query(`${paymentSelect("IPD", "WHERE pay.PaymentID = @PaymentID AND pay.AdmissionID IS NOT NULL")}`);
+  if (!result.recordset[0]) return res.status(404).json({ message: "Payment not found" });
   res.json(result.recordset[0]);
 });
 
-const deleteIPDPayment = asyncHandler(async (req, res) => {
-  const pool = await getPool();
-  const result = await pool
-    .request()
-    .input("PaymentID", sql.Int, req.params.id)
-    .query(`
-      DELETE FROM IPDPayments
-      OUTPUT DELETED.*
-      WHERE PaymentID = @PaymentID
-    `);
-
-  if (!result.recordset[0]) {
-    return res.status(404).json({ message: "IPD payment not found" });
-  }
-
-  res.json(result.recordset[0]);
-});
+const createIPDPayment = asyncHandler((req, res) => createPayment(req, res, "IPD"));
+const updateIPDPayment = asyncHandler((req, res) => updatePayment(req, res, "IPD"));
+const deleteIPDPayment = asyncHandler((req, res) => deletePayment(req, res, "AdmissionID"));
 
 module.exports = {
   listOPDPayments,

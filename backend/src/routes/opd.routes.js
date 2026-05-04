@@ -1,3 +1,4 @@
+// OPD routes: appointments, available slots, prescriptions, and meds.
 const router = require("express").Router();
 const {
   listAvailableDoctorSlots,

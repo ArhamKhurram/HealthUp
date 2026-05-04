@@ -1,3 +1,4 @@
+// IPD routes: admissions, progress notes, prescriptions, and IPD test orders.
 const router = require("express").Router();
 const {
   listAdmissions,

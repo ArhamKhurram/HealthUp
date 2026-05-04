@@ -1,3 +1,4 @@
+// Role-targeted pages and reusable admin/clinical workflow UI sections.
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Activity,
@@ -165,7 +166,7 @@ function DataTable({ rows, columns, empty = "No records yet." }) {
         </thead>
         <tbody>
           {rows.map((row, index) => (
-            <tr key={row.id || row.UserID || row.PatientID || row.DoctorID || row.AppointmentID || row.PaymentID || index}>
+            <tr key={row.id || row.UserID || row.PatientID || row.DoctorID || row.AppointmentID || row.AdmissionID || row.PrescriptionID || row.TestOrderID || row.PaymentID || index}>
               {columns.map((column) => (
                 <td key={column.key}>{column.render ? column.render(row) : String(row[column.key] ?? "")}</td>
               ))}
@@ -1752,7 +1753,7 @@ export function OrderOpdTests({ user }) {
       return;
     }
     try {
-      await api.post("/tests/orders/opd", { appointmentId: Number(form.appointmentId), patientId: selected.PatientID, testId: Number(form.testId), results: form.results, status: "Ordered" });
+      await api.post("/tests/orders/opd", { appointmentId: Number(form.appointmentId), patientId: selected.PatientID, doctorId: selected.DoctorID, testId: Number(form.testId), results: form.results, status: "Ordered" });
       setMessage("OPD test ordered.");
       setForm({ appointmentId: "", testId: "", results: "" });
     } catch (requestError) {
@@ -1909,7 +1910,7 @@ export function MyAdmissions({ user }) {
             { key: "AdmissionType", label: "Type" },
             { key: "WardName", label: "Ward" },
             { key: "BedNumber", label: "Bed" },
-            { key: "AttendingDoctorName", label: "Doctor" },
+            { key: "DoctorName", label: "Doctor", render: (row) => row.DoctorName || row.AttendingDoctorName || "-" },
             { key: "Status", label: "Status", render: (row) => <span className={`patient-status ${String(row.Status || "").toLowerCase()}`}>{row.Status || "Unknown"}</span> },
             { key: "AdmissionDate", label: "Admitted On", render: (row) => row.AdmissionDate ? new Date(row.AdmissionDate).toLocaleDateString() : "-" }
           ]}
@@ -1996,15 +1997,13 @@ export function ReceptionDashboard() {
   const patients = useApi("/patients");
   const appointments = useApi("/opd/appointments");
   const admissions = useApi("/ipd/admissions");
-  const beds = useApi("/departments/beds");
   const opdPayments = useApi("/billing/opd-payments", []);
-  const availableBeds = beds.data.filter((bed) => bed.Status === "Available").length;
   const todayAppointments = appointments.data.filter((item) => new Date(item.AppointmentDate).toDateString() === new Date().toDateString()).length;
   const opdRevenue = opdPayments.data.reduce((sum, item) => sum + Number(item.PaidAmount || 0), 0);
   return (
     <>
       <PageHeader eyebrow="Receptionist" title="Reception Dashboard" icon={Users} />
-      <StatGrid stats={[{ label: "Patients", value: patients.data.length }, { label: "Appointments", value: appointments.data.length }, { label: "Today OPD", value: todayAppointments }, { label: "IPD Active", value: admissions.data.filter((a) => a.Status === "Admitted").length }, { label: "Available Beds", value: availableBeds }, { label: "OPD Revenue", value: `Rs ${opdRevenue.toLocaleString()}` }]} />
+      <StatGrid stats={[{ label: "Patients", value: patients.data.length }, { label: "Appointments", value: appointments.data.length }, { label: "Today OPD", value: todayAppointments }, { label: "IPD Active", value: admissions.data.filter((a) => a.Status === "Admitted").length }, { label: "OPD Revenue", value: `Rs ${opdRevenue.toLocaleString()}` }]} />
       <section className="panel-grid">
         <article className="data-panel">
           <header><div><CalendarDays size={20} /><h2>Upcoming OPD</h2></div><span>{appointments.data.length}</span></header>
@@ -2022,25 +2021,29 @@ export function ReceptionDashboard() {
 export function AdmitPatientPage() {
   const patients = useApi("/patients");
   const doctors = useApi("/doctors");
-  const wards = useApi("/departments/wards");
-  const beds = useApi("/departments/beds");
-  const [form, setForm] = useState({ patientId: "", doctorId: "", wardId: "", bedId: "", admissionType: "Emergency" });
+  const departments = useApi("/departments");
+  const [form, setForm] = useState({ patientId: "", doctorId: "", departmentId: "", bedNumber: "", diagnosis: "" });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const selectedWard = wards.data.find((ward) => String(ward.WardID) === String(form.wardId));
+  const selectedDepartment = departments.data.find((department) => String(department.DepartmentID) === String(form.departmentId));
   const doctorOptions = doctors.data.filter((doctor) => {
-    if (!selectedWard) return true;
-    if (!doctor.Departments) return true;
-    return String(doctor.Departments).toLowerCase().includes(String(selectedWard.DepartmentName || "").toLowerCase());
+    if (!selectedDepartment) return true;
+    return !doctor.DepartmentID || String(doctor.DepartmentID) === String(selectedDepartment.DepartmentID);
   });
   const submit = async (event) => {
     event.preventDefault();
     setMessage("");
     setError("");
     try {
-      await api.post("/ipd/admissions", { patientId: Number(form.patientId), attendingDoctorId: Number(form.doctorId), wardId: Number(form.wardId), bedId: Number(form.bedId), admissionType: form.admissionType, clinicalDiagnosis: "Reception admission" });
+      await api.post("/ipd/admissions", {
+        patientId: Number(form.patientId),
+        doctorId: Number(form.doctorId),
+        departmentId: Number(form.departmentId),
+        bedNumber: form.bedNumber,
+        diagnosis: form.diagnosis || "Reception admission"
+      });
       setMessage("Patient admitted.");
-      setForm({ patientId: "", doctorId: "", wardId: "", bedId: "", admissionType: "Emergency" });
+      setForm({ patientId: "", doctorId: "", departmentId: "", bedNumber: "", diagnosis: "" });
     } catch (requestError) {
       setError(requestError.response?.data?.message || "Unable to admit patient.");
     }
@@ -2050,11 +2053,11 @@ export function AdmitPatientPage() {
       <PageHeader eyebrow="Receptionist" title="Admit Patient" icon={BedDouble} />
       <article className="data-panel form-panel"><form onSubmit={submit}>
         <Field label="Patient"><SelectInput value={form.patientId} onChange={(v) => setForm((c) => ({ ...c, patientId: v }))} options={patients.data.map((p) => ({ value: p.PatientID, label: p.FullName }))} required /></Field>
-        <Field label="Ward"><SelectInput value={form.wardId} onChange={(v) => setForm((c) => ({ ...c, wardId: v, doctorId: "", bedId: "" }))} options={wards.data.map((w) => ({ value: w.WardID, label: w.WardName }))} required /></Field>
-        <Field label="Doctor"><SelectInput value={form.doctorId} onChange={(v) => setForm((c) => ({ ...c, doctorId: v }))} options={doctorOptions.map((d) => ({ value: d.DoctorID, label: `${d.FullName}${d.Departments ? ` (${d.Departments})` : ""}` }))} required /></Field>
-        <Field label="Bed"><SelectInput value={form.bedId} onChange={(v) => setForm((c) => ({ ...c, bedId: v }))} options={beds.data.filter((b) => b.Status === "Available" && (!form.wardId || String(b.WardID) === String(form.wardId))).map((b) => ({ value: b.BedID, label: `${b.WardName} ${b.BedNumber}` }))} required /></Field>
-        <Field label="Admission type"><SelectInput value={form.admissionType} onChange={(v) => setForm((c) => ({ ...c, admissionType: v }))} options={["Emergency", "Scheduled", "Observation"].map((item) => ({ value: item, label: item }))} required /></Field>
-        <p className="muted">Attending doctor must be active and aligned with ward department assignment.</p>
+        <Field label="Department"><SelectInput value={form.departmentId} onChange={(v) => setForm((c) => ({ ...c, departmentId: v, doctorId: "" }))} options={departments.data.map((d) => ({ value: d.DepartmentID, label: d.DepartmentName }))} required /></Field>
+        <Field label="Doctor"><SelectInput value={form.doctorId} onChange={(v) => setForm((c) => ({ ...c, doctorId: v }))} options={doctorOptions.map((d) => ({ value: d.DoctorID, label: `${d.FullName}${d.DepartmentName ? ` (${d.DepartmentName})` : ""}` }))} required /></Field>
+        <Field label="Bed number"><TextInput value={form.bedNumber} onChange={(v) => setForm((c) => ({ ...c, bedNumber: v }))} placeholder="Example: IPD-101" required /></Field>
+        <Field label="Diagnosis"><TextInput value={form.diagnosis} onChange={(v) => setForm((c) => ({ ...c, diagnosis: v }))} /></Field>
+        <p className="muted">For the simplified DB demo, bed number is recorded directly on the admission instead of managing a separate beds table.</p>
         <button type="submit"><Save size={18} />Admit patient</button>
         {message && <p className="success">{message}</p>}
         {error && <p className="error">{error}</p>}
@@ -2228,6 +2231,7 @@ export function OrderIpdTestsPage({ user }) {
     await api.post("/tests/orders/ipd", {
       admissionId: Number(form.admissionId),
       patientId: selected.PatientID,
+      doctorId: selected.AttendingDoctorID,
       testId: Number(form.testId),
       status: "Ordered",
       results: form.results

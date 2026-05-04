@@ -1,3 +1,4 @@
+// Axios API client with JWT bearer injection from localStorage.
 import axios from "axios";
 
 const api = axios.create({

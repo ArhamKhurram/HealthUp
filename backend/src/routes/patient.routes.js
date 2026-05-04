@@ -1,3 +1,4 @@
+// Patient profile CRUD routes.
 const router = require("express").Router();
 const {
   listPatients,

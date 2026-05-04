@@ -1,3 +1,4 @@
+// Doctor profile CRUD routes.
 const router = require("express").Router();
 const { listDoctors, getDoctor, createDoctor, updateDoctor, deleteDoctor } = require("../controllers/doctor.controller");
 const { requireAuth, requireRole } = require("../middleware/auth");

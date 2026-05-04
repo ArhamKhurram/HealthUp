@@ -1,3 +1,4 @@
+// Server bootstrap: loads env, connects DB pool, and starts HTTP listener.
 require("dotenv").config();
 
 const app = require("./app");
@@ -15,4 +16,3 @@ getPool()
     console.error("Failed to connect to SQL Server", error);
     process.exit(1);
   });
-

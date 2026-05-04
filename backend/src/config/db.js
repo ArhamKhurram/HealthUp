@@ -1,3 +1,4 @@
+// SQL Server connection/pool singleton for the backend runtime.
 const sql = require("mssql");
 
 const config = {
@@ -27,4 +28,3 @@ function getPool() {
 }
 
 module.exports = { sql, getPool };
-

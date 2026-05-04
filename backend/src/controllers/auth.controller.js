@@ -1,3 +1,4 @@
+// Authentication and patient self-registration handlers.
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { sql, getPool } = require("../config/db");
